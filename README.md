@@ -7,13 +7,13 @@ Important:
 - The actual upload still needs a backend URL that the Pi provides when the portal is activated.
 - Use config.json to switch between closed and active states.
 
-Suggested production domain:
-- upload.im-glauben.de
+Suggested GitHub Pages URL:
+- https://timowse.github.io/upload-portal/
 
 How to publish to GitHub Pages:
 1. Push the repository.
 2. Enable Pages on the main branch/root.
-3. Set the custom domain if your DNS already points to GitHub Pages.
+3. Use the default GitHub Pages URL unless you later add a real custom domain.
 
 Activation flow:
 - Start the Pi upload backend.
