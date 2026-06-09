@@ -1,0 +1,454 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light" />
+  <meta name="theme-color" content="#f4f6fb" />
+  <title>Upload Portal</title>
+  <style>
+    :root {
+      --bg: #f4f6fb;
+      --card: rgba(255,255,255,.92);
+      --border: rgba(15,23,42,.08);
+      --text: #0f172a;
+      --muted: #64748b;
+      --line: #e5e7eb;
+      --accent: #3659e5;
+      --accent2: #7c3aed;
+      --success: #166534;
+      --success-bg: #dcfce7;
+      --danger-bg: #fee2e2;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: linear-gradient(180deg, #f8faff 0%, var(--bg) 100%);
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+    .shell {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }
+    .card {
+      width: min(100%, 780px);
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      box-shadow: 0 24px 80px rgba(15, 23, 42, .10);
+      backdrop-filter: blur(12px);
+      overflow: hidden;
+    }
+    .header {
+      padding: 28px 28px 18px;
+      border-bottom: 1px solid #eef2f7;
+    }
+    .kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-size: .84rem;
+      letter-spacing: .10em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: #f8fafc;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+    }
+    .kicker .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #94a3b8;
+    }
+    .kicker.active .dot { background: #16a34a; }
+    .kicker.closed .dot { background: #dc2626; }
+    h1 {
+      margin: 14px 0 10px;
+      font-size: clamp(2rem, 4vw, 3.1rem);
+      line-height: 1.02;
+      letter-spacing: -0.04em;
+    }
+    .lede {
+      margin: 0;
+      font-size: clamp(1rem, 1.6vw, 1.12rem);
+      line-height: 1.6;
+      color: var(--muted);
+      max-width: 62ch;
+    }
+    .content { padding: 24px 28px 28px; }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+      overflow: hidden;
+    }
+    .panel-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      padding: 20px 20px 14px;
+      border-bottom: 1px solid #eef2f7;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-size: .82rem;
+      font-weight: 700;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+      border-radius: 999px;
+      padding: 7px 10px;
+    }
+    .badge.on { background: var(--success-bg); color: var(--success); }
+    .badge.off { background: var(--danger-bg); color: #991b1b; }
+    .badge .mini {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      opacity: .85;
+    }
+    .summary {
+      color: var(--muted);
+      line-height: 1.5;
+      font-size: .98rem;
+      max-width: 60ch;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr .8fr;
+      gap: 16px;
+      padding: 20px;
+    }
+    .box {
+      border: 1px solid #e8edf3;
+      border-radius: 18px;
+      background: #fff;
+      padding: 18px;
+    }
+    .box h2 {
+      margin: 0 0 8px;
+      font-size: 1.02rem;
+      letter-spacing: -.02em;
+    }
+    .list {
+      display: grid;
+      gap: 10px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+    .list li {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      border: 1px solid #eef2f7;
+      border-radius: 14px;
+      padding: 12px 14px;
+      background: #f8fafc;
+      color: #0f172a;
+    }
+    .list .label { color: var(--muted); }
+    .list .value { font-weight: 700; text-align: right; }
+    .drop {
+      position: relative;
+      border: 1.5px dashed #cfd8e3;
+      border-radius: 20px;
+      background: linear-gradient(180deg, #fff 0%, #fbfcfe 100%);
+      padding: 24px;
+      transition: .18s ease;
+      min-height: 210px;
+      display: grid;
+      gap: 14px;
+      align-content: center;
+    }
+    .drop:hover { transform: translateY(-1px); border-color: #94a3b8; box-shadow: 0 10px 30px rgba(15,23,42,.06); }
+    .drop input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+    .drop .icon {
+      width: 56px; height: 56px; border-radius: 18px;
+      display: grid; place-items: center;
+      font-weight: 800; font-size: 1.5rem;
+      color: var(--accent);
+      background: #eef4ff;
+      margin-bottom: 4px;
+    }
+    .drop h3 {
+      margin: 0;
+      font-size: 1.08rem;
+      letter-spacing: -.02em;
+    }
+    .drop p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .filename {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #f8fafc;
+      border: 1px solid #e5e7eb;
+      border-radius: 14px;
+      padding: 12px 14px;
+      word-break: break-word;
+      color: #334155;
+      min-height: 46px;
+      display: flex;
+      align-items: center;
+    }
+    .actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+      align-items: center;
+    }
+    button {
+      appearance: none;
+      border: 0;
+      border-radius: 14px;
+      padding: 13px 18px;
+      background: linear-gradient(90deg, var(--text), #1f2937);
+      color: white;
+      font-size: 1rem;
+      font-weight: 700;
+      min-width: 164px;
+      box-shadow: 0 10px 26px rgba(15,23,42,.16);
+      cursor: pointer;
+    }
+    button:disabled {
+      background: #d0d5dd;
+      color: #667085;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+    .hint { color: var(--muted); font-size: .94rem; }
+    .progress {
+      height: 6px;
+      background: #eef2f7;
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 12px;
+    }
+    .bar {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, var(--accent), var(--accent2));
+      transition: width .25s ease;
+    }
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+      padding: 16px 20px 20px;
+      border-top: 1px solid #eef2f7;
+      color: var(--muted);
+      font-size: .9rem;
+    }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .hidden { display: none !important; }
+    .statusline {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: .92rem;
+    }
+    .open-mode .drop .icon { background: #dcfce7; color: #166534; }
+    .open-mode .drop { border-color: #86efac; }
+    @media (max-width: 760px) {
+      .grid { grid-template-columns: 1fr; }
+      .panel-top { flex-direction: column; }
+      .content, .header { padding-left: 18px; padding-right: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="card">
+      <div class="header">
+        <div id="kicker" class="kicker closed"><span class="dot"></span><span id="kicker-text">Wird geladen</span></div>
+        <h1 id="title">Upload Portal</h1>
+        <p id="lede" class="lede">Ladezustand wird geprüft…</p>
+      </div>
+
+      <div class="content">
+        <div class="panel">
+          <div class="panel-top">
+            <div>
+              <div id="badge" class="badge off"><span class="mini"></span><span id="badge-text">geschlossen</span></div>
+              <div id="summary" class="summary" style="margin-top: 10px;">Keine aktive Freigabe gefunden.</div>
+            </div>
+            <div class="summary mono" id="endpoint-box">URL: /config.json</div>
+          </div>
+
+          <div class="grid">
+            <div class="box">
+              <h2>Upload</h2>
+              <form id="form" class="drop hidden" method="POST" enctype="multipart/form-data">
+                <input id="file" type="file" name="file" required />
+                <div class="icon">↑</div>
+                <h3 id="drop-title">Datei auswählen oder hier ablegen</h3>
+                <p id="drop-copy">Kein Login, kein Zwangs-Refresh — nur ein sauberer Upload-Link.</p>
+                <div class="filename" id="fname">Noch keine Datei ausgewählt</div>
+                <div class="progress"><div id="bar" class="bar"></div></div>
+                <div class="actions">
+                  <button id="submit" type="submit" disabled>Datei hochladen</button>
+                  <div class="hint" id="hint">Aktiviere den Upload, um ihn zu nutzen.</div>
+                </div>
+                <div class="statusline" id="statusline"></div>
+              </form>
+              <div id="closed-state" class="drop">
+                <div class="icon">⦸</div>
+                <h3>Gerade nicht aktiv</h3>
+                <p>Der Link ist vorbereitet, aber zurzeit nicht freigeschaltet. Sobald der Pi ihn aktiviert, erscheint hier das Upload-Formular.</p>
+              </div>
+            </div>
+
+            <div class="box">
+              <h2>Optionen</h2>
+              <ul class="list" id="options"></ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <div>GitHub Pages · eigenes Branding · klarer Direktlink</div>
+        <div class="mono" id="footer-path">/</div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      active: false,
+      title: 'Upload Portal',
+      lede: 'Ladezustand wird geprüft…',
+      summary: '',
+      backendUrl: '',
+      method: 'POST',
+      multiFile: false,
+      maxFiles: 1,
+      autoClose: true,
+      path: '/',
+      label: 'geschlossen',
+      options: []
+    };
+
+    const els = {
+      kicker: document.getElementById('kicker'),
+      kickerText: document.getElementById('kicker-text'),
+      title: document.getElementById('title'),
+      lede: document.getElementById('lede'),
+      badge: document.getElementById('badge'),
+      badgeText: document.getElementById('badge-text'),
+      summary: document.getElementById('summary'),
+      endpointBox: document.getElementById('endpoint-box'),
+      options: document.getElementById('options'),
+      form: document.getElementById('form'),
+      file: document.getElementById('file'),
+      fname: document.getElementById('fname'),
+      submit: document.getElementById('submit'),
+      hint: document.getElementById('hint'),
+      bar: document.getElementById('bar'),
+      statusline: document.getElementById('statusline'),
+      closedState: document.getElementById('closed-state'),
+      dropTitle: document.getElementById('drop-title'),
+      dropCopy: document.getElementById('drop-copy'),
+      footerPath: document.getElementById('footer-path')
+    };
+
+    function setBadge(active) {
+      els.kicker.className = 'kicker ' + (active ? 'active' : 'closed');
+      els.kickerText.textContent = active ? 'Freigabe aktiv' : 'Geschlossen';
+      els.badge.className = 'badge ' + (active ? 'on' : 'off');
+      els.badgeText.textContent = active ? 'aktiv' : 'geschlossen';
+      document.body.classList.toggle('open-mode', active);
+    }
+
+    function renderOptions(cfg) {
+      const rows = [
+        ['Modus', cfg.multiFile ? 'mehrere Dateien' : 'eine Datei'],
+        ['Max. Uploads', String(cfg.maxFiles || 1)],
+        ['Auto-Close', cfg.autoClose ? 'ja' : 'nein'],
+        ['Backend', cfg.backendUrl ? 'konfiguriert' : 'nicht gesetzt'],
+      ];
+      els.options.innerHTML = rows.map(([label, value]) => `<li><span class="label">${label}</span><span class="value">${value}</span></li>`).join('');
+    }
+
+    function applyConfig(cfg) {
+      Object.assign(state, cfg || {});
+      const active = Boolean(state.active && state.backendUrl);
+      setBadge(active);
+      els.title.textContent = state.title || 'Upload Portal';
+      els.lede.textContent = state.lede || 'Upload auf Abruf.';
+      els.summary.textContent = state.summary || (active ? 'Upload ist freigeschaltet.' : 'Keine aktive Freigabe gefunden.');
+      els.endpointBox.textContent = 'URL: ' + (state.path || '/');
+      els.footerPath.textContent = state.path || '/';
+      renderOptions(state);
+
+      if (active) {
+        els.closedState.classList.add('hidden');
+        els.form.classList.remove('hidden');
+        els.form.action = state.backendUrl;
+        els.file.multiple = Boolean(state.multiFile);
+        els.dropTitle.textContent = state.multiFile ? 'Dateien auswählen oder hier ablegen' : 'Datei auswählen oder hier ablegen';
+        els.dropCopy.textContent = state.multiFile ? 'Mehrere Dateien sind in diesem Modus erlaubt.' : 'Nur eine Datei ist in diesem Modus erlaubt.';
+        els.hint.textContent = state.autoClose ? 'Nach dem erfolgreichen Upload schließt die Seite automatisch.' : 'Nach dem Upload bleibt die Seite offen.';
+      } else {
+        els.closedState.classList.remove('hidden');
+        els.form.classList.add('hidden');
+      }
+    }
+
+    function updateFileLabel() {
+      const files = els.file.files ? Array.from(els.file.files) : [];
+      if (!files.length) {
+        els.fname.textContent = 'Noch keine Datei ausgewählt';
+        els.submit.disabled = true;
+        return;
+      }
+      els.fname.textContent = files.map(f => `${f.name} · ${Math.max(1, Math.round(f.size / 1024))} KB`).join(' | ');
+      els.submit.disabled = false;
+    }
+
+    els.file.addEventListener('change', updateFileLabel);
+    els.form.addEventListener('submit', () => {
+      els.submit.disabled = true;
+      els.submit.textContent = 'Lade hoch…';
+      els.bar.style.width = '72%';
+      els.statusline.textContent = 'Upload wird gesendet…';
+    });
+
+    async function loadConfig() {
+      try {
+        const r = await fetch('config.json?ts=' + Date.now(), { cache: 'no-store' });
+        if (!r.ok) throw new Error('config.json ' + r.status);
+        const cfg = await r.json();
+        applyConfig(cfg);
+      } catch (err) {
+        applyConfig({
+          active: false,
+          title: 'Upload Portal',
+          lede: 'Konfiguration nicht erreichbar.',
+          summary: 'Es ist gerade keine freigegebene Konfiguration verfügbar.',
+          path: '/',
+          options: []
+        });
+        els.statusline.textContent = 'config.json konnte nicht geladen werden.';
+      }
+    }
+
+    loadConfig();
+  </script>
+</body>
+</html>
