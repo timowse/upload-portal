@@ -1,67 +1,45 @@
 # Upload Portal
 
-A private file exchange running on a Raspberry Pi. One direction takes files
-in through an on-demand link, the other hands them back out with a preview.
+A public file drop on a Raspberry Pi. Upload something, get a link, send it
+on. Files delete themselves after 30 days.
 
 ```
-you         browser ─► up.t1mo.dev/admin ──────────────┐
-                       dashboard, password             │
-                                                       │
-receiving   iPhone ──► upload.t1mo.dev ──► API calls ──┤── Cloudflare Tunnel ─► Pi :8090
-                       GitHub Pages                    │
-                                                       │
-sharing     anyone ──► up.t1mo.dev/s/<token> ──────────┘
-                       viewer page served by the Pi
+upload.t1mo.dev   GitHub Pages ─┐
+                                 ├─► API on up.t1mo.dev ─► Cloudflare Tunnel ─► Pi :8090
+up.t1mo.dev       the Pi ───────┘
+
+up.t1mo.dev/s/<token>            the preview page for one file
 ```
 
-The upload page is static and holds no secrets. The share pages are rendered
-by the Pi, because a messenger asking for a link preview only sees the server
-response — it cannot run the page, and it never sends the URL fragment, so
-Open Graph tags have to come from the server.
+Both hostnames serve the same `index.html`. Pages reads `config.json` to find
+the API; served from the Pi the file is absent and the API is simply
+same-origin. So the page keeps working from either address, and the Pi does
+not need Pages to be up.
 
-## The dashboard
+## No accounts, by choice
 
-Everything runs from `https://up.t1mo.dev/admin` — on a phone, add it to the
-home screen and it behaves like an app. Nothing here needs a terminal.
+Anyone who opens either address can upload, and anyone holding a share link
+can fetch that file until it expires. There is no login, because the point is
+to hand a link to someone who should not have to make an account.
 
-- **Send someone a file.** Pick it, watch it upload, and the share sheet opens
-  by itself with the link already made. On iOS that is the native sheet, so it
-  goes straight into WhatsApp or Messages.
-- **Have someone send you a file.** One button mints the one-shot upload link
-  and offers it for sharing.
-- **Manage what is there.** Every file lists with a thumbnail. `⋯` reveals the
-  link, a way to revoke it, and delete.
+That also means the service is open to whoever finds it, and it will be
+found: `up.t1mo.dev` appears in the public Certificate Transparency logs the
+moment Cloudflare issues its certificate, and those logs get scanned. The
+limits below are what stands between that and a full disk — they are
+operational ceilings, not access control.
 
-The dashboard is locked behind a password, because it can upload, publish and
-delete. Set one before the first start:
+| Guard | Default | Setting |
+| --- | --- | --- |
+| Size per file | 2 GB | `PORTAL_MAX_GB` |
+| Lifetime | 30 days | `PORTAL_DAYS` |
+| Uploads per address per hour | 30 | `PORTAL_UPLOADS_PER_HOUR` |
+| Disk kept free | 5 GB | `PORTAL_KEEP_FREE_GB` |
 
-```bash
-cd ~/upload-portal
-echo "PORTAL_ADMIN_PASSWORD=$(openssl rand -base64 18)" > .env
-cat .env          # note it down, this is your login
-docker compose up -d --build
-```
+An upload is refused with 507 once free space would fall below the floor, so
+a full disk never takes the rest of the Pi down with it. A sweeper runs hourly
+and also removes blobs no index entry claims.
 
-`.env` is gitignored and never leaves the Pi. Without it the service starts but
-refuses to open the dashboard at all. The login sets a signed, HttpOnly cookie
-that lasts a month, and repeated wrong guesses are throttled.
-
-## Links, and what they are worth
-
-An upload link carries its token in the URL fragment, which browsers never send
-to a server, so GitHub Pages never sees it. `GET /api/status` without a valid
-token answers a flat `{"active": false}`, so polling reveals neither that a
-session exists nor what it allows. The session closes itself once the allowed
-uploads are used up, which makes the old link worthless.
-
-A share link carries its token in the path, because the Pi has to read it to
-render the page. Anyone holding one can fetch that file until you revoke it.
-
-Uploads are chunked at 32 MB. Cloudflare caps a proxied request body at 100 MB
-on the free plan and tunnel traffic is always proxied, so phone videos would
-otherwise fail with a 413 before reaching the Pi.
-
-## What the recipient of a share sees
+## What the recipient sees
 
 | Kind | Presentation |
 | --- | --- |
@@ -73,34 +51,30 @@ otherwise fail with a 413 before reaching the Pi.
 | text, code, csv | first 256 KB, monospace |
 | anything else | download card |
 
-Videos are served with byte ranges. This is not an optimisation: Safari
-refuses to play a video at all unless the server answers a range request
-with 206, and seeking depends on it everywhere.
+The Pi renders the preview page itself rather than Pages, because a messenger
+fetching a link for its preview card only sees the server response — it cannot
+run the page, and it never sends a URL fragment. So Open Graph tags have to
+come from the server, and sharing a link produces a real card rather than a
+bare URL.
+
+Files are served with byte ranges. This is not an optimisation: Safari refuses
+to play a video at all unless a range request is answered with 206, and
+seeking depends on it everywhere.
 
 A browser can only play what it can decode. `.mkv`, `.avi` and friends get a
 download card rather than a dead player, and there is no transcoding — a Pi 4
 would take hours over it.
 
-## The same things from a terminal
+## Uploading is chunked
 
-```bash
-docker compose exec upload-portal python portalctl.py open --files 1 --max-size 2G
-docker compose exec upload-portal python portalctl.py list
-docker compose exec upload-portal python portalctl.py share urlaub.jpg --days 7
-docker compose exec upload-portal python portalctl.py shares
-docker compose exec upload-portal python portalctl.py unshare <token>
-docker compose exec upload-portal python portalctl.py close
-```
+The browser slices a file into 32 MB pieces and the service appends them in
+order. Cloudflare caps a proxied request body at 100 MB on the free plan and
+tunnel traffic is always proxied, so phone videos would otherwise fail with a
+413 before reaching the Pi.
 
-## Limits are enforced on the Pi
-
-A page cannot enforce anything a direct `curl -T` would skip, so the service
-checks every limit itself: the token on each request, the declared size
-against the session maximum, the bytes actually received against the declared
-size, the chunk order, and the remaining upload count. Filenames are reduced
-to a safe basename and prefixed with a timestamp so nothing overwrites
-anything. The timestamp is stripped again for display, so recipients see
-`urlaub.jpg` rather than the bookkeeping.
+Names never become paths. Bytes live under `blobs/<id>` with an opaque name
+and the name a person sees is metadata, so two people uploading `IMG_0001.HEIC`
+do not collide and nothing a caller types reaches the filesystem.
 
 ## Setup on the Pi
 
@@ -112,43 +86,46 @@ volumes:
   - /home/twiese/work/nextcloud-pi/data/upload-portal:/data
 ```
 
-That path sits inside the Nextcloud data tree because that is where the disk
-is mounted. Move the host side if Nextcloud is ever put back into service.
-
 ```bash
-echo "PORTAL_ADMIN_PASSWORD=$(openssl rand -base64 18)" > .env
 docker compose up -d --build
-curl -s localhost:8090/healthz                                  # {"ok":true}
-docker compose exec upload-portal python test_portal.py         # 52 checks
+curl -s localhost:8090/healthz                              # {"ok":true}
+docker compose exec upload-portal python test_portal.py     # 31 checks
 ```
 
 The Cloudflare Tunnel is dashboard-managed, so there is no `config.yml` on the
 Pi. Its public hostname lives under Networks → Tunnels → Configure → published
 application routes: `up` · `t1mo.dev` · HTTP · `localhost:8090`.
 
+Files from the earlier layout under `incoming/` are adopted automatically on
+first start and given the standard lifetime.
+
+## Housekeeping
+
+Nothing below is needed for daily use.
+
+```bash
+docker compose exec upload-portal python portalctl.py list --links
+docker compose exec upload-portal python portalctl.py stats
+docker compose exec upload-portal python portalctl.py rm <id>
+docker compose exec upload-portal python portalctl.py sweep
+```
+
 ## Endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/api/status?t=` | what this session token allows |
-| `POST` | `/api/upload/init?t=` | reserve a slot, returns `uploadId` |
-| `PUT` | `/api/upload/part?t=&id=&i=` | one chunk, in order |
-| `POST` | `/api/upload/done?t=&id=` | finalise, count it, maybe close |
-| `GET` | `/s/{token}` | viewer page with Open Graph tags |
+| `GET` | `/` | the upload page |
+| `GET` | `/api/config` | limits and lifetime, for the page |
+| `POST` | `/api/upload/init` | reserve a slot, returns `uploadId` |
+| `PUT` | `/api/upload/part?id=&i=` | one chunk, in order |
+| `POST` | `/api/upload/done?id=` | finalise, returns the link |
+| `GET` | `/s/{token}` | preview page with Open Graph tags |
 | `GET` | `/s/{token}/meta` | what the viewer needs to pick a presentation |
 | `GET` | `/s/{token}/file` | the file, with byte ranges |
 | `GET` | `/s/{token}/preview` | browser-safe rendition of an image |
-| `GET` | `/s/{token}/thumb` | small JPEG for the preview card and poster |
+| `GET` | `/s/{token}/thumb` | small JPEG for the card and the poster |
 | `GET` | `/s/{token}/dl` | same file as an attachment |
 | `GET` | `/healthz` | container health check |
-| `GET` | `/admin` | dashboard, password protected |
-| `POST` | `/admin/api/login` · `logout` | session cookie |
-| `GET` | `/admin/api/files` | what is on the disk, with share state |
-| `POST` | `/admin/api/share` · `unshare` · `delete` | manage a file |
-| `POST` | `/admin/api/inbox` · `inbox/close` | the one-shot upload link |
-
-Signed in, the upload endpoints accept the cookie instead of a session token,
-and an upload of your own does not spend a slot meant for someone else.
 
 Thumbnails need Pillow, pillow-heif and ffmpeg, all of which the image
 installs. If any of them fails, previews degrade to a download card rather
