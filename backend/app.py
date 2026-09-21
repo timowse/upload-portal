@@ -370,3 +370,94 @@ def share_page(token: str) -> HTMLResponse:
     for key, value in replacements.items():
         html = html.replace(key, value if key == '__META__' else _escape(value))
     return HTMLResponse(html, headers={'Cache-Control': 'no-store'})
+
+
+# --------------------------------------------------------------------------
+# Bundles: one link for several files, next to the link each one has anyway.
+# --------------------------------------------------------------------------
+
+BUNDLE_PAGE = _page('bundle.html')
+
+
+@app.post('/api/bundle')
+async def bundle_create(request: Request) -> dict:
+    """Build a bundle from share links the caller already holds.
+
+    Taking share tokens rather than file ids means this grants nothing new:
+    whoever calls it could already reach every file they are naming.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail='ungültiger Request')
+
+    tokens = body.get('tokens')
+    if not isinstance(tokens, list) or not 2 <= len(tokens) <= 50:
+        raise HTTPException(status_code=400, detail='Zwei bis fünfzig Dateien')
+
+    ids = []
+    for tok in tokens:
+        found = db.share_target(str(tok))
+        if not found:
+            raise HTTPException(status_code=404, detail='Ein Link ist unbekannt oder abgelaufen')
+        if found['id'] not in ids:
+            ids.append(found['id'])
+
+    token = db.create_bundle(ids)
+    if not token:
+        raise HTTPException(status_code=400, detail='Bündel konnte nicht angelegt werden')
+    return {'link': f'{PUBLIC_BASE}/c/{token}', 'count': len(ids)}
+
+
+def _bundle_or_404(token: str) -> dict:
+    found = db.bundle(token)
+    if not found:
+        raise HTTPException(status_code=404, detail='Link unbekannt oder abgelaufen')
+    return found
+
+
+def _bundle_meta(found: dict) -> dict:
+    files = []
+    for f in found['files']:
+        share = f.get('share')
+        files.append({
+            'name': f['name'],
+            'size': f['size'],
+            'kind': media.kind_of(f['name']),
+            'link': f'{PUBLIC_BASE}/s/{share}',
+            'thumb': f'{PUBLIC_BASE}/s/{share}/thumb',
+            'hasThumb': media.thumbnail(f['id'], f['name']) is not None,
+        })
+    return {
+        'count': len(files),
+        'size': found['size'],
+        'expires': found['expires'],
+        'daysLeft': max(0, round((found['expires'] - time.time()) / 86400)),
+        'base': f"{PUBLIC_BASE}/c/{found['token']}",
+        'files': files,
+    }
+
+
+@app.get('/c/{token}/meta')
+def bundle_meta(token: str) -> dict:
+    return _bundle_meta(_bundle_or_404(token))
+
+
+@app.get('/c/{token}', response_class=HTMLResponse)
+def bundle_page(token: str) -> HTMLResponse:
+    found = _bundle_or_404(token)
+    info = _bundle_meta(found)
+    cover = next((f for f in info['files'] if f['hasThumb']), None)
+
+    html = BUNDLE_PAGE.read_text(encoding='utf-8')
+    title = f"{info['count']} Dateien"
+    replacements = {
+        '__TITLE__': title,
+        '__OG_IMAGE__': cover['thumb'] if cover else '',
+        '__OG_URL__': info['base'],
+        '__OG_DESC__': f"{info['size'] / 1024 / 1024:.1f} MB · noch {info['daysLeft']} Tage",
+        '__META__': json.dumps(info),
+    }
+    for key, value in replacements.items():
+        html = html.replace(key, value if key == '__META__' else _escape(value))
+    return HTMLResponse(html, headers={'Cache-Control': 'no-store'})

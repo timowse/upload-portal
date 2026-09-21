@@ -169,9 +169,12 @@ const fmt = (n) => {
 // Mirrors days_for() on the server, so the page can state the trade before
 // anything is sent. The server still decides; this only has to agree.
 function daysFor(size) {
+  const floor = CFG.minDays || 7;
   if (!CFG.baseBytes || size <= CFG.baseBytes) return CFG.days;
-  return Math.max(CFG.minDays || 7,
-                  Math.min(CFG.days, Math.round(CFG.baseBytes * CFG.days / size)));
+  const span = Math.max(1, CFG.maxBytes - CFG.baseBytes);
+  const exact = CFG.days + (floor - CFG.days) * Math.min(1, (size - CFG.baseBytes) / span);
+  const days = exact >= 10 ? Math.round(exact / 5) * 5 : Math.round(exact);
+  return Math.max(floor, Math.min(CFG.days, days));
 }
 
 function toast(text) {
@@ -306,6 +309,40 @@ function finish(ui, result) {
   ui.el.append(box, acts);
 }
 
+// Every file keeps its own link. Once there are at least two, they also get
+// one link that holds all of them, rebuilt as more arrive.
+const session = [];
+
+async function addBundle() {
+  if (session.length < 2) return;
+  let result;
+  try {
+    result = await post('/api/bundle', { tokens: session.map((l) => l.split('/').pop()) });
+  } catch (_) {
+    return;
+  }
+  document.getElementById('bundle')?.remove();
+  const el = document.createElement('div');
+  el.className = 'item ready';
+  el.id = 'bundle';
+  el.innerHTML = `<div class="top"><div class="nm">Alle ${result.count} Dateien zusammen</div></div>
+    <div class="st good">Ein Link für alles</div>
+    <div class="linkbox"><code></code></div>
+    <div class="acts">
+      <button class="btn primary" data-a="share">Teilen</button>
+      <button class="btn" data-a="copy">Kopieren</button>
+      <a class="btn" href="${result.link}" target="_blank" rel="noopener">Ansehen</a>
+    </div>`;
+  el.querySelector('code').textContent = result.link;
+  el.querySelector('[data-a=share]').addEventListener('click',
+    () => hand(result.link, `${result.count} Dateien`));
+  el.querySelector('[data-a=copy]').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(result.link); toast('Link kopiert'); }
+    catch (_) { prompt('Link', result.link); }
+  });
+  $('list').prepend(el);
+}
+
 async function run(files) {
   for (const file of Array.from(files)) {
     const ui = card(file);
@@ -318,13 +355,16 @@ async function run(files) {
       continue;
     }
     try {
-      finish(ui, await uploadOne(file, ui));
+      const result = await uploadOne(file, ui);
+      finish(ui, result);
+      session.push(result.link);
     } catch (err) {
       ui.track.remove();
       ui.st.className = 'st bad';
       ui.st.textContent = err.message;
     }
   }
+  await addBundle();
 }
 
 $('pick').addEventListener('change', (e) => { run(e.target.files); e.target.value = ''; });
