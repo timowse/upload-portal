@@ -11,9 +11,12 @@ import argparse
 import os
 import re
 import sys
+import time
 
+import shares
 import store
 
+PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://up.t1mo.dev').rstrip('/')
 LINK_BASE = os.environ.get('PORTAL_LINK_BASE', 'https://upload.t1mo.dev').rstrip('/')
 
 UNITS = {'K': 1024, 'M': 1024 ** 2, 'G': 1024 ** 3, 'T': 1024 ** 4}
@@ -65,6 +68,14 @@ def main() -> int:
     sub.add_parser('status', help='aktuellen Zustand anzeigen')
     sub.add_parser('list', help='empfangene Dateien auflisten')
 
+    sh = sub.add_parser('share', help='Datei teilen und Link ausgeben')
+    sh.add_argument('datei', help='Dateiname aus "list"')
+    sh.add_argument('--days', type=int, default=None, help='nach wie vielen Tagen der Link verfaellt')
+
+    sub.add_parser('shares', help='aktive Teilen-Links auflisten')
+    un = sub.add_parser('unshare', help='einen Teilen-Link zurueckziehen')
+    un.add_argument('token')
+
     args = p.parse_args()
 
     if args.cmd == 'open':
@@ -81,8 +92,36 @@ def main() -> int:
         files = sorted(store.INCOMING_DIR.iterdir(), key=lambda f: f.stat().st_mtime, reverse=True)
         if not files:
             print('(noch nichts empfangen)')
+        shared = {e['file'] for e in shares.read().values()}
         for f in files:
-            print(f'{human(f.stat().st_size):>10}  {f.name}')
+            mark = ' (geteilt)' if f.name in shared else ''
+            print(f'{human(f.stat().st_size):>10}  {f.name}{mark}')
+
+    elif args.cmd == 'share':
+        try:
+            entry = shares.create(args.datei, args.days)
+        except FileNotFoundError:
+            print(f'Datei nicht gefunden: {args.datei}', file=sys.stderr)
+            print('Verfuegbare Dateien zeigt "list".', file=sys.stderr)
+            return 1
+        path = store.INCOMING_DIR / args.datei
+        print(f"Link    : {PUBLIC_BASE}/s/{entry['token']}")
+        print(f'Datei   : {args.datei} ({human(path.stat().st_size)}, {shares.kind_of(args.datei)})')
+        print(f"Gueltig : {'unbegrenzt' if not args.days else str(args.days) + ' Tage'}")
+        # Build the preview now so the first visitor does not wait for it.
+        if shares.thumbnail(entry['token'], path):
+            print('Vorschau: erzeugt')
+
+    elif args.cmd == 'shares':
+        data = shares.read()
+        if not data:
+            print('(keine aktiven Links)')
+        for token, e in sorted(data.items(), key=lambda kv: kv[1]['created'], reverse=True):
+            exp = time.strftime('%d.%m.%Y', time.localtime(e['expires'])) if e.get('expires') else 'unbegrenzt'
+            print(f"{token:14} {e['file'][:44]:46} {e.get('views', 0):>4} Aufrufe  bis {exp}")
+
+    elif args.cmd == 'unshare':
+        print('zurueckgezogen' if shares.revoke(args.token) else 'unbekannter Token')
     return 0
 
 

@@ -161,3 +161,172 @@ def upload_done(t: str | None = Query(default=None), id: str = Query(...)) -> di
         'remaining': store.remaining(state),
         'closed': not state['active'],
     }
+
+
+# --------------------------------------------------------------------------
+# Sharing: a link that shows the file rather than just handing it over.
+# --------------------------------------------------------------------------
+
+import re  # noqa: E402
+from urllib.parse import quote  # noqa: E402
+
+from fastapi import Path as PathParam  # noqa: E402
+from fastapi.responses import HTMLResponse, Response, StreamingResponse  # noqa: E402
+
+import shares  # noqa: E402
+
+PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://up.t1mo.dev').rstrip('/')
+VIEWER = Path(__file__).with_name('viewer.html')
+READ_CHUNK = 256 * 1024
+
+
+def _disposition(name: str, download: bool) -> str:
+    """Give plain clients an ASCII name and capable ones the real one."""
+    ascii_name = re.sub(r'[^\x20-\x7e]', '_', name).replace('"', '')
+    return (f'{"attachment" if download else "inline"}; filename="{ascii_name}"; '
+            f"filename*=UTF-8''{quote(name)}")
+
+
+def _serve_file(path: Path, request: Request, mime: str, *, download: bool = False,
+                max_age: int = 3600, name: str | None = None) -> Response:
+    """Serve a file with byte ranges.
+
+    Safari will not play a video at all unless the server answers a range
+    request with 206, and seeking in any browser depends on it, so this is
+    not an optimisation.
+    """
+    stat = path.stat()
+    size = stat.st_size
+    headers = {
+        'Accept-Ranges': 'bytes',
+        'ETag': f'"{int(stat.st_mtime)}-{size}"',
+        'Cache-Control': f'private, max-age={max_age}',
+        'Content-Disposition': _disposition(name or path.name, download),
+    }
+
+    start, end, status = 0, size - 1, 200
+    rng = request.headers.get('range')
+    if rng:
+        m = re.match(r'bytes=(\d*)-(\d*)\s*$', rng.strip())
+        if m and (m.group(1) or m.group(2)):
+            if m.group(1):
+                start = int(m.group(1))
+                end = int(m.group(2)) if m.group(2) else size - 1
+            else:
+                start = max(0, size - int(m.group(2)))
+            if start >= size:
+                return Response(status_code=416, headers={'Content-Range': f'bytes */{size}'})
+            end = min(end, size - 1)
+            status = 206
+            headers['Content-Range'] = f'bytes {start}-{end}/{size}'
+
+    length = end - start + 1
+    headers['Content-Length'] = str(length)
+
+    def body():
+        with open(path, 'rb') as fh:
+            fh.seek(start)
+            left = length
+            while left > 0:
+                chunk = fh.read(min(READ_CHUNK, left))
+                if not chunk:
+                    break
+                left -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(body(), status_code=status, media_type=mime, headers=headers)
+
+
+def _share_or_404(token: str):
+    found = shares.resolve(token)
+    if not found:
+        raise HTTPException(status_code=404, detail='Link unbekannt oder abgelaufen')
+    return found
+
+
+def _meta(token: str, entry: dict, path: Path) -> dict:
+    kind = shares.kind_of(path.name)
+    stat = path.stat()
+    data = {
+        'name': shares.display_name(path.name),
+        'stored': path.name,
+        'size': stat.st_size,
+        'kind': kind,
+        'mime': shares.mime_of(path.name),
+        'playable': shares.playable(path.name) if kind == 'video' else True,
+        'base': f'{PUBLIC_BASE}/s/{token}',
+        'hasThumb': shares.thumbnail(token, path) is not None,
+    }
+    data.update(shares.probe(path))
+    return data
+
+
+@app.get('/s/{token}/meta')
+def share_meta(request: Request, token: str = PathParam(...)) -> dict:
+    entry, path = _share_or_404(token)
+    return _meta(token, entry, path)
+
+
+@app.get('/s/{token}/file')
+def share_file(request: Request, token: str = PathParam(...)) -> Response:
+    _entry, path = _share_or_404(token)
+    return _serve_file(path, request, shares.mime_of(path.name))
+
+
+@app.get('/s/{token}/dl')
+def share_download(request: Request, token: str = PathParam(...)) -> Response:
+    _entry, path = _share_or_404(token)
+    return _serve_file(path, request, shares.mime_of(path.name), download=True,
+                       name=shares.display_name(path.name))
+
+
+@app.get('/s/{token}/preview')
+def share_preview(request: Request, token: str = PathParam(...)) -> Response:
+    """An image the browser can actually paint - HEIC becomes JPEG here."""
+    _entry, path = _share_or_404(token)
+    rendition = shares.preview_image(token, path)
+    if not rendition:
+        raise HTTPException(status_code=415, detail='Keine Vorschau moeglich')
+    mime = 'image/jpeg' if rendition != path else shares.mime_of(path.name)
+    return _serve_file(rendition, request, mime, max_age=86400)
+
+
+@app.get('/s/{token}/thumb')
+def share_thumb(request: Request, token: str = PathParam(...)) -> Response:
+    _entry, path = _share_or_404(token)
+    thumb = shares.thumbnail(token, path)
+    if not thumb:
+        raise HTTPException(status_code=404, detail='Kein Vorschaubild')
+    return _serve_file(thumb, request, 'image/jpeg', max_age=86400)
+
+
+@app.get('/s/{token}', response_class=HTMLResponse)
+def share_page(request: Request, token: str = PathParam(...)) -> HTMLResponse:
+    """The viewer itself.
+
+    Rendered here rather than on Pages so that a messenger fetching the URL
+    gets Open Graph tags and a thumbnail, and therefore shows a real preview
+    card instead of a bare link.
+    """
+    entry, path = _share_or_404(token)
+    meta = _meta(token, entry, path)
+    shares.count_view(token)
+
+    og_image = f"{meta['base']}/thumb" if meta['hasThumb'] else ''
+    og_type = {'image': 'article', 'video': 'video.other'}.get(meta['kind'], 'website')
+    html = VIEWER.read_text(encoding='utf-8')
+    for key, value in {
+        '__TITLE__': meta['name'],
+        '__OG_TYPE__': og_type,
+        '__OG_IMAGE__': og_image,
+        '__OG_URL__': meta['base'],
+        '__OG_DESC__': f"{meta['kind']} · {meta['size'] / 1024 / 1024:.1f} MB",
+        '__META__': json.dumps(meta),
+    }.items():
+        html = html.replace(key, value if key == '__META__' else _escape(value))
+    return HTMLResponse(html, headers={'Cache-Control': 'no-store'})
+
+
+def _escape(text: str) -> str:
+    return (str(text).replace('&', '&amp;').replace('<', '&lt;')
+            .replace('>', '&gt;').replace('"', '&quot;'))

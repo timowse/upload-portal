@@ -8,6 +8,9 @@ services:
       PORTAL_ORIGIN: https://upload.t1mo.dev
       # Base of the link that portalctl prints when a session opens.
       PORTAL_LINK_BASE: https://upload.t1mo.dev
+      # Share links are served by the Pi itself, so a messenger fetching one
+      # gets Open Graph tags and shows a real preview card.
+      PORTAL_PUBLIC_BASE: https://up.t1mo.dev
     volumes:
       # Uploads land on the USB disk, never on the SD card.
       - /home/twiese/work/nextcloud-pi/data/upload-portal:/data
