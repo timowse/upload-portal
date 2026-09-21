@@ -504,11 +504,17 @@
         for (let i = 0; i < files.length; i++) {
           progress(0);
           last = await uploadOne(files[i], i, files.length);
+          // Keep the panel honest between files of a multi-file upload.
+          status.remaining = last.remaining;
+          status.active = !last.closed;
+          renderOptions();
+          els['footer-note'].textContent = last.closed ? 'geschlossen' : `${last.remaining} frei`;
         }
         progress(1);
+        const left = last ? last.remaining : 0;
         els['done-copy'].textContent = last && last.closed
           ? 'Danke, alles angekommen. Der Link ist jetzt geschlossen.'
-          : `Danke, angekommen. Es sind noch ${last ? last.remaining : 0} Uploads frei.`;
+          : `Danke, angekommen. Es ${left === 1 ? 'ist noch ein Upload' : `sind noch ${left} Uploads`} frei.`;
         setMode('done');
         say('');
       } catch (err) {
