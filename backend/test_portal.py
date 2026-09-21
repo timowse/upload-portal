@@ -141,12 +141,47 @@ with TestClient(appmod.app) as c:
              for _ in range(4)]
     check('bremst nach dem Limit', codes[:2] == [200, 200] and codes[-1] == 429, codes)
 
+    section('Sammel-Link')
+    appmod.UPLOADS_PER_HOUR = 500
+    appmod._recent.clear()
+    a = upload(c, 'eins.jpg', b'a' * 1000).json()['link'].rsplit('/', 1)[-1]
+    bshare = upload(c, 'zwei.jpg', b'b' * 2000).json()['link'].rsplit('/', 1)[-1]
+    check('eine Datei ergibt kein Buendel',
+          c.post('/api/bundle', json={'tokens': [a]}).status_code == 400)
+    check('unbekannter Link wird abgewiesen',
+          c.post('/api/bundle', json={'tokens': [a, 'gibtsnicht123']}).status_code == 404)
+    made = c.post('/api/bundle', json={'tokens': [a, bshare]})
+    check('Buendel angelegt', made.status_code == 200 and made.json()['count'] == 2, made.text)
+    btok = made.json()['link'].rsplit('/', 1)[-1]
+    bmeta = c.get(f'/c/{btok}/meta').json()
+    check('enthaelt beide Dateien', bmeta['count'] == 2 and bmeta['size'] == 3000, bmeta)
+    check('jede Datei behaelt ihren eigenen Link',
+          all('/s/' in f['link'] for f in bmeta['files']), bmeta['files'])
+    check('Restlaufzeit auch am Buendel', bmeta['daysLeft'] == db.DEFAULT_DAYS)
+    bpage = c.get(f'/c/{btok}')
+    check('Sammel-Seite liefert HTML', bpage.status_code == 200 and '<title>' in bpage.text)
+    check('Open-Graph nennt die Anzahl', 'og:title" content="2 Dateien"' in bpage.text)
+    check('unbekanntes Buendel -> 404', c.get('/c/gibtsnicht123').status_code == 404)
+
+    first = db.share_target(a)['id']
+    db.delete_file(first)
+    rest = c.get(f'/c/{btok}/meta').json()
+    check('geloeschte Datei faellt aus dem Buendel', rest['count'] == 1, rest)
+    db.delete_file(db.share_target(bshare)['id'])
+    check('leeres Buendel -> 404', c.get(f'/c/{btok}').status_code == 404)
+
     section('Staffel: groesser heisst kuerzer gespeichert')
     saved = (db.BASE_BYTES, db.MAX_BYTES, db.DEFAULT_DAYS, db.MIN_DAYS)
     db.BASE_BYTES, db.MAX_BYTES, db.DEFAULT_DAYS, db.MIN_DAYS = 5 * db.GB, 10 * db.GB, 30, 7
     check('kleine Datei bekommt die volle Zeit', db.days_for(100 * 1024 ** 2) == 30)
     check('genau 5 GB bekommt 30 Tage', db.days_for(5 * db.GB) == 30)
-    check('10 GB bekommt 15 Tage', db.days_for(10 * db.GB) == 15, db.days_for(10 * db.GB))
+    check('10 GB bekommt 7 Tage', db.days_for(10 * db.GB) == 7, db.days_for(10 * db.GB))
+    check('Staffel laeuft 30/25/20/15/10/7',
+          [s['days'] for s in db.scale()] == [30, 25, 20, 15, 10, 7],
+          [s['days'] for s in db.scale()])
+    check('auch zwischen den Stufen nie steigend',
+          all(db.days_for(int(a / 10 * db.GB)) >= db.days_for(int((a + 1) / 10 * db.GB))
+              for a in range(50, 100)))
     steps = db.scale()
     check('sechs Stufen in 1-GB-Schritten', len(steps) == 6 and
           [s['bytes'] // db.GB for s in steps] == [5, 6, 7, 8, 9, 10], steps)

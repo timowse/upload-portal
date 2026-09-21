@@ -44,7 +44,7 @@ MAX_DAYS = 365
 KEEP_FREE = int(float(os.environ.get('PORTAL_KEEP_FREE_GB', '5')) * 1024 ** 3)
 
 SAFE_ID = re.compile(r'^[A-Za-z0-9_-]{6,64}$')
-EMPTY: dict = {'files': {}, 'shares': {}}
+EMPTY: dict = {'files': {}, 'shares': {}, 'bundles': {}}
 
 
 def ensure_dirs() -> None:
@@ -69,7 +69,9 @@ def load() -> dict:
         data = json.loads(DB_FILE.read_text(encoding='utf-8'))
     except (FileNotFoundError, json.JSONDecodeError):
         data = {}
-    return {'files': dict(data.get('files', {})), 'shares': dict(data.get('shares', {}))}
+    return {'files': dict(data.get('files', {})),
+            'shares': dict(data.get('shares', {})),
+            'bundles': dict(data.get('bundles', {}))}
 
 
 def save(data: dict) -> None:
@@ -99,14 +101,18 @@ def accepting(size: int) -> bool:
 def days_for(size: int) -> int:
     """How long a file of this size is kept.
 
-    Size times days stays roughly constant, so one 10 GB file costs the
-    disk about what a 5 GB file kept twice as long costs. That is the whole
-    trade the uploader is being offered, and it is the reason the number is
-    shown before anything is sent.
+    A straight line from DEFAULT_DAYS at BASE_BYTES down to MIN_DAYS at
+    MAX_BYTES. The exact line runs through numbers like 25.4 and 16.2, so
+    the result is rounded to something worth reading: fives while the
+    figure is large, whole days once it is small. Both ends land on their
+    stated value exactly.
     """
     if size <= BASE_BYTES:
         return DEFAULT_DAYS
-    return max(MIN_DAYS, min(DEFAULT_DAYS, round(BASE_BYTES * DEFAULT_DAYS / size)))
+    ratio = min(1.0, (size - BASE_BYTES) / max(1, MAX_BYTES - BASE_BYTES))
+    exact = DEFAULT_DAYS + (MIN_DAYS - DEFAULT_DAYS) * ratio
+    days = round(exact / 5) * 5 if exact >= 10 else round(exact)
+    return max(MIN_DAYS, min(DEFAULT_DAYS, int(days)))
 
 
 def scale() -> list[dict]:
@@ -171,6 +177,12 @@ def delete_file(fid: str) -> bool:
         if not entry:
             return False
         data['shares'].pop(entry.get('share'), None)
+        for tok, bundle_entry in list(data['bundles'].items()):
+            rest = [f for f in bundle_entry['files'] if f != fid]
+            if rest:
+                bundle_entry['files'] = rest
+            else:
+                data['bundles'].pop(tok, None)
         save(data)
     blob(fid).unlink(missing_ok=True)
     for leftover in THUMB_DIR.glob(f'{fid}*'):
@@ -205,6 +217,44 @@ def count_view(tok: str) -> None:
             save(data)
 
 
+# -------------------------------------------------------------- bundles
+
+def create_bundle(file_ids: list[str]) -> str | None:
+    """One link for several files, alongside the link each one already has."""
+    with locked():
+        data = load()
+        live = [f for f in file_ids if f in data['files']]
+        if len(live) < 2:
+            return None
+        tok = token(9)
+        data['bundles'][tok] = {'files': live, 'created': int(time.time())}
+        save(data)
+        return tok
+
+
+def bundle(tok: str) -> dict | None:
+    """Resolve a bundle, skipping members that expired or went missing."""
+    if not SAFE_ID.match(tok or ''):
+        return None
+    data = load()
+    entry = data['bundles'].get(tok)
+    if not entry:
+        return None
+    now = time.time()
+    items = []
+    for fid in entry['files']:
+        f = data['files'].get(fid)
+        if not f or now > f['expires'] or not blob(fid).is_file():
+            continue
+        items.append({'id': fid, **f})
+    if not items:
+        return None
+    # The bundle is only good while its shortest-lived member is.
+    return {'token': tok, 'files': items,
+            'expires': min(f['expires'] for f in items),
+            'size': sum(f['size'] for f in items)}
+
+
 # --------------------------------------------------------------- expiry
 
 def sweep() -> list[str]:
@@ -219,6 +269,15 @@ def sweep() -> list[str]:
     for stray in BLOB_DIR.iterdir():
         if stray.is_file() and stray.name not in known:
             stray.unlink(missing_ok=True)
+
+    with locked():
+        data = load()
+        empty = [t for t, e in data['bundles'].items()
+                 if not any(f in data['files'] for f in e['files'])]
+        for t in empty:
+            data['bundles'].pop(t, None)
+        if empty:
+            save(data)
     return doomed
 
 

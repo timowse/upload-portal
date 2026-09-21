@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="dark" />
+<meta name="theme-color" content="#0b0d12" />
+<meta name="robots" content="noindex, nofollow" />
+<title>__TITLE__</title>
+<meta property="og:type" content="article" />
+<meta property="og:title" content="__TITLE__" />
+<meta property="og:description" content="__OG_DESC__" />
+<meta property="og:url" content="__OG_URL__" />
+<meta property="og:image" content="__OG_IMAGE__" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:title" content="__TITLE__" />
+<meta name="twitter:image" content="__OG_IMAGE__" />
+<style>
+  :root{
+    --bg:#0b0d12; --card:#141822; --line:rgba(255,255,255,.10); --soft:rgba(255,255,255,.05);
+    --text:#eef2f9; --muted:#96a2b6; --accent:#6b8afd;
+    --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
+    --safe-l:env(safe-area-inset-left,0px); --safe-r:env(safe-area-inset-right,0px);
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;min-height:100%}
+  body{
+    background:var(--bg);color:var(--text);line-height:1.5;
+    font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{
+    max-width:760px;margin:0 auto;
+    padding:calc(22px + var(--safe-t)) calc(14px + var(--safe-r)) calc(30px + var(--safe-b)) calc(14px + var(--safe-l));
+  }
+  header{margin-bottom:18px}
+  h1{font-size:1.5rem;margin:0 0 5px;letter-spacing:-.02em}
+  .sub{color:var(--muted);font-size:.9rem}
+  .btn{
+    appearance:none;border:1px solid var(--line);background:var(--soft);color:var(--text);
+    border-radius:12px;padding:11px 16px;font:inherit;font-size:.92rem;font-weight:650;
+    cursor:pointer;min-height:44px;display:inline-flex;align-items:center;
+    justify-content:center;gap:8px;text-decoration:none;
+  }
+  .btn:active{transform:scale(.98)}
+  .btn.primary{background:var(--accent);border-color:transparent;color:#fff}
+  .bar{display:flex;gap:9px;margin-top:14px}
+  .bar .btn{flex:1}
+
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:20px}
+  @media (min-width:620px){ .grid{grid-template-columns:repeat(3,1fr)} }
+  .tile{
+    display:block;text-decoration:none;color:inherit;background:var(--card);
+    border:1px solid var(--line);border-radius:15px;overflow:hidden;
+  }
+  .tile:active{transform:scale(.985)}
+  .shot{
+    aspect-ratio:1/1;width:100%;display:grid;place-items:center;
+    background:var(--soft);color:var(--muted);font-size:2rem;overflow:hidden;
+  }
+  .shot img{width:100%;height:100%;object-fit:cover;display:block}
+  .cap{padding:9px 11px 11px}
+  .cap .nm{
+    font-size:.85rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .cap .sz{font-size:.76rem;color:var(--muted);margin-top:1px}
+  .play{
+    position:relative;
+  }
+  .play::after{
+    content:'';position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    width:42px;height:42px;border-radius:50%;background:rgba(12,14,20,.62);
+    backdrop-filter:blur(10px);
+  }
+  .play::before{
+    content:'';position:absolute;z-index:2;left:calc(50% + 2px);top:50%;
+    transform:translate(-50%,-50%);border-left:13px solid #fff;
+    border-top:8px solid transparent;border-bottom:8px solid transparent;
+  }
+  .toast{
+    position:fixed;left:50%;bottom:calc(22px + var(--safe-b));transform:translateX(-50%);
+    background:var(--card);border:1px solid var(--line);border-radius:999px;padding:11px 20px;
+    font-size:.88rem;z-index:60;opacity:0;transition:opacity .25s;pointer-events:none;
+  }
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 id="title">…</h1>
+    <div class="sub" id="sub"></div>
+    <div class="bar">
+      <button class="btn primary" id="share">Teilen</button>
+      <button class="btn" id="copy">Link kopieren</button>
+    </div>
+  </header>
+  <div class="grid" id="grid"></div>
+</div>
+<div class="toast" id="toast">Link kopiert</div>
+
+<script>
+const META = __META__;
+const $ = (id) => document.getElementById(id);
+
+const fmt = (n) => {
+  const u = ['B','KB','MB','GB','TB']; let v = Number(n)||0, i = 0;
+  while (v >= 1024 && i < u.length-1) { v /= 1024; i++; }
+  return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + ' ' + u[i];
+};
+const GLYPH = { image:'🖼', video:'🎬', audio:'♪', pdf:'📕', text:'📝', file:'📄' };
+
+// The bundle only lives as long as its shortest-lived member, so the number
+// shown here is that one, not an average.
+function gueltig() {
+  const left = META.expires * 1000 - Date.now();
+  if (left <= 0) return 'abgelaufen';
+  const days = Math.round(left / 86400000);
+  if (days >= 2) return `noch ${days} Tage gültig`;
+  const hours = Math.round(left / 3600000);
+  if (hours >= 2) return `noch ${hours} Stunden gültig`;
+  return 'läuft bald ab';
+}
+
+$('title').textContent = `${META.count} Dateien`;
+$('sub').textContent = `${fmt(META.size)} gesamt · ${gueltig()}`;
+
+async function hand() {
+  if (navigator.share) {
+    try { await navigator.share({ title: `${META.count} Dateien`, url: META.base }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  copy();
+}
+async function copy() {
+  try {
+    await navigator.clipboard.writeText(META.base);
+    const t = $('toast'); t.classList.add('show');
+    setTimeout(() => t.classList.remove('show'), 1600);
+  } catch (_) { prompt('Link', META.base); }
+}
+$('share').addEventListener('click', hand);
+$('copy').addEventListener('click', copy);
+
+const grid = $('grid');
+for (const f of META.files) {
+  const a = document.createElement('a');
+  a.className = 'tile';
+  a.href = f.link;
+  const visual = f.hasThumb
+    ? `<div class="shot${f.kind === 'video' ? ' play' : ''}"><img src="${f.thumb}" alt="" loading="lazy"></div>`
+    : `<div class="shot">${GLYPH[f.kind] || GLYPH.file}</div>`;
+  a.innerHTML = `${visual}<div class="cap"><div class="nm"></div><div class="sz">${fmt(f.size)}</div></div>`;
+  a.querySelector('.nm').textContent = f.name;
+  grid.appendChild(a);
+}
+</script>
+</body>
+</html>

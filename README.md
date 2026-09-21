@@ -7,6 +7,7 @@ on. Files delete themselves again.
 share.t1mo.dev            the upload page
 share.t1mo.dev/api/…      the API behind it        ─► Cloudflare Tunnel ─► Pi :8090
 share.t1mo.dev/s/<token>  the preview page for one file
+share.t1mo.dev/c/<token>  the gallery for several
 ```
 
 One hostname for everything, served by the Pi. Page and API are same-origin,
@@ -45,16 +46,29 @@ before anything is sent:
 | --- | --- |
 | 5 GB | 30 days |
 | 6 GB | 25 days |
-| 7 GB | 21 days |
-| 8 GB | 19 days |
-| 9 GB | 17 days |
-| 10 GB | 15 days |
+| 7 GB | 20 days |
+| 8 GB | 15 days |
+| 9 GB | 10 days |
+| 10 GB | 7 days |
 
-Size times days stays roughly constant, so one 10 GB file costs the disk about
-what a 5 GB file kept twice as long costs. The figure follows the file's real
-size rather than the slider, so a small file uploaded with the ceiling raised
-still keeps the full 30 days. The preview page states how much longer the link
+The line runs straight from 30 days at 5 GB to 7 days at 10 GB. Its exact
+values are figures like 25.4 and 16.2, so they are rounded to something worth
+reading — fives while the number is large, whole days once it is small — and
+both ends land on their stated value exactly. The figure follows the file's
+real size rather than the slider, so a small file uploaded with the ceiling
+raised still keeps the full 30 days. The preview page states how much longer the link
 will work, so the person who receives it does not have to guess.
+
+## One link, or one per file
+
+Every upload gets its own link the moment it lands. Upload more than one file
+and they also get a shared link, a gallery at `/c/<token>` where each tile
+opens that file's own page. Both kinds work at once: hand out the bundle, or
+hand out one file, or both.
+
+A bundle holds no bytes of its own. It lives exactly as long as its
+shortest-lived member, loses a file that was deleted or expired, and
+disappears once nothing is left.
 
 ## What the recipient sees
 
@@ -106,7 +120,7 @@ volumes:
 ```bash
 docker compose up -d --build
 curl -s localhost:8090/healthz                              # {"ok":true}
-docker compose exec upload-portal python test_portal.py     # 41 checks
+docker compose exec upload-portal python test_portal.py     # 54 checks
 ```
 
 The Cloudflare Tunnel is dashboard-managed, so there is no `config.yml` on the
@@ -142,6 +156,9 @@ docker compose exec upload-portal python portalctl.py sweep
 | `GET` | `/s/{token}/preview` | browser-safe rendition of an image |
 | `GET` | `/s/{token}/thumb` | small JPEG for the card and the poster |
 | `GET` | `/s/{token}/dl` | same file as an attachment |
+| `POST` | `/api/bundle` | one link for several, from links already held |
+| `GET` | `/c/{token}` | the gallery for a bundle |
+| `GET` | `/c/{token}/meta` | its contents, for the page |
 | `GET` | `/healthz` | container health check |
 
 Thumbnails need Pillow, pillow-heif and ffmpeg, all of which the image

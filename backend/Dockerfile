@@ -12,7 +12,7 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/db.py backend/media.py backend/app.py backend/portalctl.py \
-     backend/test_portal.py backend/viewer.html ./
+     backend/test_portal.py backend/viewer.html backend/bundle.html ./
 # The same page GitHub Pages serves, so both hostnames work on their own.
 COPY index.html ./
 
