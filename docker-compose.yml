@@ -1,0 +1,22 @@
+services:
+  upload-portal:
+    build: ./backend
+    container_name: upload-portal
+    restart: unless-stopped
+    environment:
+      # Browser origin allowed to call the API. Must match the Pages domain.
+      PORTAL_ORIGIN: https://upload.t1mo.dev
+      # Base of the link that portalctl prints when a session opens.
+      PORTAL_LINK_BASE: https://upload.t1mo.dev
+    volumes:
+      # Uploads land on the USB disk, never on the SD card.
+      - /home/twiese/work/nextcloud-pi/data/upload-portal:/data
+    ports:
+      # Only cloudflared on the host talks to this, so keep it off the LAN.
+      - "127.0.0.1:8090:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/healthz').read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
