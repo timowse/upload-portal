@@ -109,7 +109,7 @@ def main() -> int:
         print(f'Datei   : {args.datei} ({human(path.stat().st_size)}, {shares.kind_of(args.datei)})')
         print(f"Gueltig : {'unbegrenzt' if not args.days else str(args.days) + ' Tage'}")
         # Build the preview now so the first visitor does not wait for it.
-        if shares.thumbnail(entry['token'], path):
+        if shares.thumbnail(path):
             print('Vorschau: erzeugt')
 
     elif args.cmd == 'shares':

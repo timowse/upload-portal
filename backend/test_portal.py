@@ -16,13 +16,16 @@ DATA = tempfile.mkdtemp(prefix='portal-test-')
 os.environ['PORTAL_DATA'] = DATA
 os.environ['PORTAL_ORIGIN'] = 'https://upload.t1mo.dev'
 os.environ['PORTAL_PUBLIC_BASE'] = 'https://up.t1mo.dev'
+os.environ['PORTAL_ADMIN_PASSWORD'] = 'test-passwort-1234'
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import auth  # noqa: E402
 import shares  # noqa: E402
 import store  # noqa: E402
 
 importlib.reload(store)
 importlib.reload(shares)
+importlib.reload(auth)
 import app as appmod  # noqa: E402
 
 importlib.reload(appmod)
@@ -128,6 +131,46 @@ check('Bereich hinter dem Ende -> 416',
 section('Zuruecknehmen')
 check('Link zurueckgezogen', shares.revoke(share))
 check('danach 404', c.get(f'/s/{share}').status_code == 404)
+
+section('Oberflaeche: Anmeldung')
+# Secure cookies are only kept over https, so this client speaks https.
+a = TestClient(appmod.app, base_url='https://testserver')
+check('ohne Anmeldung keine Dateiliste', a.get('/admin/api/files').status_code == 401)
+check('Zustand sagt nicht angemeldet', a.get('/admin/api/state').json()['authed'] is False)
+check('falsches Passwort abgelehnt',
+      a.post('/admin/api/login', json={'password': 'daneben'}).status_code == 401)
+check('richtiges Passwort angenommen',
+      a.post('/admin/api/login', json={'password': 'test-passwort-1234'}).status_code == 200)
+check('danach angemeldet', a.get('/admin/api/state').json()['authed'] is True)
+check('Seite wird ausgeliefert', '<title>Dateien</title>' in a.get('/admin').text)
+
+section('Oberflaeche: hochladen ohne Einmal-Token')
+before = store.read()
+check('Freigabe ist zu', not before['active'])
+own = a.post('/api/upload/init', json={'name': 'eigenes.png', 'size': 9}).json()
+check('Upload ohne Token erlaubt, weil angemeldet', 'uploadId' in own, own)
+a.put('/api/upload/part', params={'id': own['uploadId'], 'i': 0}, content=b'123456789')
+fin = a.post('/api/upload/done', params={'id': own['uploadId']}).json()
+check('Upload abgeschlossen', fin['ok'], fin)
+check('verbraucht keinen fremden Upload-Platz', store.read()['uploaded'] == before['uploaded'])
+
+section('Oberflaeche: teilen und aufraeumen')
+listing = a.get('/admin/api/files').json()['files']
+mine = next(f for f in listing if f['name'] == 'eigenes.png')
+link = a.post('/admin/api/share', json={'file': mine['stored']}).json()
+check('Link erzeugt', link['link'].startswith('https://up.t1mo.dev/s/'), link)
+again = a.post('/admin/api/share', json={'file': mine['stored']}).json()
+check('zweimal teilen gibt denselben Link', again['token'] == link['token'])
+check('Link funktioniert', c.get(f"/s/{link['token']}").status_code == 200)
+check('Pfad-Traversal beim Teilen abgewehrt',
+      a.post('/admin/api/share', json={'file': '../../etc/passwd'}).status_code in (400, 404))
+check('Eingangslink laesst sich oeffnen',
+      a.post('/admin/api/inbox', json={'files': 2, 'maxGb': 1}).json()['link'].startswith('https://upload'))
+check('und wieder schliessen', a.post('/admin/api/inbox/close').json()['ok'])
+check('Datei geloescht', a.post('/admin/api/delete', json={'file': mine['stored']}).json()['ok'])
+check('Link danach tot', c.get(f"/s/{link['token']}").status_code == 404)
+check('Abmelden funktioniert', a.post('/admin/api/logout').status_code == 200)
+check('danach wieder gesperrt', a.get('/admin/api/files').status_code == 401)
 
 shutil.rmtree(DATA, ignore_errors=True)
 print(f'\n=== {passed} bestanden, {failed} fehlgeschlagen ===')

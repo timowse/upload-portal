@@ -11,7 +11,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY store.py shares.py app.py portalctl.py test_portal.py viewer.html ./
+COPY store.py shares.py auth.py app.py portalctl.py test_portal.py viewer.html admin.html ./
 
 ENV PORTAL_DATA=/data
 EXPOSE 8000

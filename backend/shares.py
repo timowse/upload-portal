@@ -8,6 +8,7 @@ tags therefore have to come from here.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
 import os
@@ -127,8 +128,6 @@ def revoke(token: str) -> bool:
         gone = data.pop(token, None) is not None
         if gone:
             write(data)
-    for f in THUMB_DIR.glob(f'{token}.*'):
-        f.unlink(missing_ok=True)
     return gone
 
 
@@ -195,10 +194,14 @@ def _video_frame(src: Path, dst: Path, box: int) -> bool:
                  str(dst)])
 
 
-def thumbnail(token: str, path: Path) -> Path | None:
+def cache_key(path: Path) -> str:
+    return hashlib.sha1(path.name.encode('utf-8')).hexdigest()[:20]
+
+
+def thumbnail(path: Path) -> Path | None:
     """A small JPEG for the preview card and the video poster, cached on disk."""
     ensure_dirs()
-    dst = THUMB_DIR / f'{token}.jpg'
+    dst = THUMB_DIR / f'{cache_key(path)}.jpg'
     if dst.exists() and dst.stat().st_mtime >= path.stat().st_mtime:
         return dst
     kind = kind_of(path.name)
@@ -207,12 +210,12 @@ def thumbnail(token: str, path: Path) -> Path | None:
     return dst if made and dst.exists() else None
 
 
-def preview_image(token: str, path: Path) -> Path | None:
+def preview_image(path: Path) -> Path | None:
     """A browser-safe rendition of an image that browsers cannot show directly."""
     if path.suffix.lower() in NATIVE_IMAGE:
         return path
     ensure_dirs()
-    dst = THUMB_DIR / f'{token}.preview.jpg'
+    dst = THUMB_DIR / f'{cache_key(path)}.preview.jpg'
     if dst.exists() and dst.stat().st_mtime >= path.stat().st_mtime:
         return dst
     return dst if _shrink_image(path, dst, PREVIEW_MAX) and dst.exists() else None
