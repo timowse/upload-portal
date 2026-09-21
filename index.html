@@ -186,7 +186,7 @@ function card(file) {
   const el = document.createElement('div');
   el.className = 'item';
   el.innerHTML = `<div class="top"><div class="nm"></div><div class="sz">${fmt(file.size)}</div></div>
-    <div class="st">wird vorbereitet…</div>
+    <div class="st">Upload startet…</div>
     <div class="track"><div class="fill"></div></div>`;
   el.querySelector('.nm').textContent = file.name;
   $('list').appendChild(el);
@@ -198,18 +198,49 @@ function card(file) {
   };
 }
 
+function restzeit(seconds, pct) {
+  if (!isFinite(seconds) || seconds < 0) return null;
+  // Only promise "almost there" near the end. The browser reports bytes
+  // handed to the socket, not bytes acknowledged, so the estimate runs
+  // optimistic in the middle of an upload - and saying "gleich fertig" at
+  // 40 % then leaves it standing for the whole second half.
+  if (pct >= 90) return 'gleich fertig';
+  const s = Math.max(seconds, 8);
+  if (s < 90) return `noch etwa ${Math.max(10, Math.round(s / 5) * 5)} Sekunden`;
+  const min = Math.round(s / 60);
+  if (min < 60) return `noch etwa ${min} Minute${min === 1 ? '' : 'n'}`;
+  const h = Math.floor(min / 60), rest = min % 60;
+  return `noch etwa ${h} Stunde${h === 1 ? '' : 'n'}` + (rest ? ` ${rest} Min.` : '');
+}
+
 async function uploadOne(file, ui) {
   const init = await post('/api/upload/init', { name: file.name, size: file.size });
   const chunks = Math.max(1, Math.ceil(file.size / init.chunkSize));
+  const started = Date.now();
   let sent = 0;
+
+  // That the file travels in pieces is our problem, not the visitor's. The
+  // page shows how far along it is and how long that will take.
+  const show = (done) => {
+    const pct = Math.min(100, Math.round((done / file.size) * 100));
+    ui.fill.style.width = pct + '%';
+    const elapsed = (Date.now() - started) / 1000;
+    const left = done > 0 && elapsed > 1.5
+      ? restzeit((file.size - done) / (done / elapsed), pct)
+      : null;
+    ui.st.textContent = `${pct} %` + (left ? ` · ${left}` : '');
+  };
+
+  show(0);
   for (let i = 0; i < chunks; i++) {
     const blob = file.slice(i * init.chunkSize, Math.min((i+1) * init.chunkSize, file.size));
     const base = sent;
-    ui.st.textContent = chunks > 1 ? `Teil ${i+1} von ${chunks}…` : 'wird hochgeladen…';
     await putChunk(`/api/upload/part?id=${encodeURIComponent(init.uploadId)}&i=${i}`, blob,
-      (loaded) => { ui.fill.style.width = ((base + loaded) / file.size) * 100 + '%'; });
+      (loaded) => show(base + loaded));
     sent += blob.size;
+    show(sent);
   }
+  ui.st.textContent = 'wird abgeschlossen…';
   return post(`/api/upload/done?id=${encodeURIComponent(init.uploadId)}`);
 }
 
