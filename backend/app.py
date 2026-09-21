@@ -27,8 +27,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingRes
 import db
 import media
 
-ALLOWED_ORIGIN = os.environ.get('PORTAL_ORIGIN', 'https://upload.t1mo.dev')
-PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://up.t1mo.dev').rstrip('/')
+ALLOWED_ORIGIN = os.environ.get('PORTAL_ORIGIN', 'https://share.t1mo.dev')
+PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://share.t1mo.dev').rstrip('/')
 UPLOADS_PER_HOUR = int(os.environ.get('PORTAL_UPLOADS_PER_HOUR', '30'))
 READ_CHUNK = 256 * 1024
 
@@ -114,9 +114,14 @@ def home() -> HTMLResponse:
 def config() -> dict:
     return {
         'chunkSize': db.CHUNK_SIZE,
+        'baseBytes': db.BASE_BYTES,
         'maxBytes': db.MAX_BYTES,
+        'stepBytes': db.STEP_BYTES,
         'days': db.DEFAULT_DAYS,
-        'maxDays': db.MAX_DAYS,
+        'minDays': db.MIN_DAYS,
+        # What each step up costs in storage time, so the page can say it
+        # before anyone commits to sending something.
+        'scale': db.scale(),
         'accepting': db.accepting(0),
         'base': PUBLIC_BASE,
     }
@@ -146,18 +151,16 @@ async def upload_init(request: Request) -> dict:
         raise HTTPException(status_code=400, detail='Die Datei ist leer')
     if size > db.MAX_BYTES:
         raise HTTPException(status_code=413,
-                            detail=f'Maximal {db.MAX_BYTES // 1024 ** 3} GB pro Datei')
+                            detail=f'Maximal {db.MAX_BYTES // db.GB} GB pro Datei')
     if not db.accepting(size):
         raise HTTPException(status_code=507, detail='Kein Platz mehr frei')
 
-    days = body.get('days')
     upload_id = db.token(12)
     session = _session_dir(upload_id)
     session.mkdir(parents=True, exist_ok=True)
     (session / 'meta.json').write_text(json.dumps({
         'name': db.safe_name(body.get('name')),
         'size': size,
-        'days': int(days) if days else db.DEFAULT_DAYS,
         'received': 0,
         'nextIndex': 0,
     }), encoding='utf-8')
@@ -207,7 +210,7 @@ def upload_done(id: str = Query(...)) -> dict:
         shutil.rmtree(session, ignore_errors=True)
         raise HTTPException(status_code=400, detail='Upload unvollständig')
 
-    entry = db.add_file(meta['name'], meta['size'], meta.get('days'))
+    entry = db.add_file(meta['name'], meta['size'])
     os.replace(part, db.blob(entry['id']))
     shutil.rmtree(session, ignore_errors=True)
     media.thumbnail(entry['id'], entry['name'])          # ready for the first visitor
