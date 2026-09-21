@@ -1,2 +1,8 @@
 fastapi==0.115.6
 uvicorn==0.34.0
+# Thumbnails and the browser-safe rendition of HEIC photos. Both are best
+# effort: the service degrades to a download card if they are unavailable.
+pillow==11.1.0
+pillow-heif==0.21.0
+# Only needed by test_portal.py, which runs inside the container.
+httpx==0.28.1

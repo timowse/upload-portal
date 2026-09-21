@@ -1,11 +1,17 @@
 FROM python:3.12-slim
 
+# ffmpeg pulls the poster frame out of a video and is the fallback path for
+# image formats Pillow was not built for.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY store.py app.py portalctl.py ./
+COPY store.py shares.py app.py portalctl.py test_portal.py viewer.html ./
 
 ENV PORTAL_DATA=/data
 EXPOSE 8000
