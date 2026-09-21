@@ -11,6 +11,9 @@ services:
       # Share links are served by the Pi itself, so a messenger fetching one
       # gets Open Graph tags and shows a real preview card.
       PORTAL_PUBLIC_BASE: https://up.t1mo.dev
+      # Unlocks the dashboard at /admin. Comes from .env, which is not in git.
+      # Without it the dashboard refuses to open at all.
+      PORTAL_ADMIN_PASSWORD: ${PORTAL_ADMIN_PASSWORD:?bitte .env anlegen}
     volumes:
       # Uploads land on the USB disk, never on the SD card.
       - /home/twiese/work/nextcloud-pi/data/upload-portal:/data

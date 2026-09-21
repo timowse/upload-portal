@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+# Holds PORTAL_ADMIN_PASSWORD. Never commit this.
+.env

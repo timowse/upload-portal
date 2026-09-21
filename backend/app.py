@@ -17,8 +17,10 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import auth
 import store
 
+ADMIN_MAX_BYTES = 16 * 1024 ** 3
 ALLOWED_ORIGIN = os.environ.get('PORTAL_ORIGIN', 'https://upload.t1mo.dev')
 
 app = FastAPI(title='Upload Portal', docs_url=None, redoc_url=None, openapi_url=None)
@@ -42,6 +44,18 @@ def _require_open(token: str | None) -> dict:
     if not store.is_open(state, token):
         raise HTTPException(status_code=403, detail='keine aktive Freigabe')
     return state
+
+
+def _upload_ctx(request: Request, token: str | None) -> dict:
+    """Who may upload right now, and under which ceiling.
+
+    The dashboard uploads with a signed cookie and does not spend a slot of
+    the one-shot session meant for other people.
+    """
+    if auth.enabled() and auth.valid(request.cookies.get(auth.COOKIE)):
+        return {'maxBytes': ADMIN_MAX_BYTES, 'admin': True}
+    state = _require_open(token)
+    return {'maxBytes': int(state['maxBytes']), 'admin': False}
 
 
 @app.get('/healthz')
@@ -72,7 +86,7 @@ def status(t: str | None = Query(default=None)) -> JSONResponse:
 
 @app.post('/api/upload/init')
 async def upload_init(request: Request, t: str | None = Query(default=None)) -> dict:
-    state = _require_open(t)
+    ctx = _upload_ctx(request, t)
     try:
         body = await request.json()
     except Exception:
@@ -85,7 +99,7 @@ async def upload_init(request: Request, t: str | None = Query(default=None)) -> 
         raise HTTPException(status_code=400, detail='Groesse fehlt')
     if size <= 0:
         raise HTTPException(status_code=400, detail='leere Datei')
-    if size > int(state['maxBytes']):
+    if size > ctx['maxBytes']:
         raise HTTPException(status_code=413, detail='Datei ueberschreitet das Limit')
 
     upload_id = store.new_token()
@@ -105,7 +119,7 @@ async def upload_part(
     id: str = Query(...),
     i: int = Query(...),
 ) -> dict:
-    state = _require_open(t)
+    ctx = _upload_ctx(request, t)
     session = _session_dir(id)
     meta_path = session / 'meta.json'
     if not meta_path.exists():
@@ -116,7 +130,7 @@ async def upload_part(
         raise HTTPException(status_code=409, detail=f"Chunk {meta['nextIndex']} erwartet")
 
     received = int(meta['received'])
-    limit = min(int(meta['size']), int(state['maxBytes']))
+    limit = min(int(meta['size']), ctx['maxBytes'])
     part_path = session / 'data.part'
 
     # Append while streaming so a large chunk never has to fit in memory,
@@ -137,8 +151,9 @@ async def upload_part(
 
 
 @app.post('/api/upload/done')
-def upload_done(t: str | None = Query(default=None), id: str = Query(...)) -> dict:
-    _require_open(t)
+def upload_done(request: Request, t: str | None = Query(default=None),
+                id: str = Query(...)) -> dict:
+    ctx = _upload_ctx(request, t)
     session = _session_dir(id)
     meta_path = session / 'meta.json'
     if not meta_path.exists():
@@ -154,6 +169,10 @@ def upload_done(t: str | None = Query(default=None), id: str = Query(...)) -> di
     os.replace(part_path, target)
     shutil.rmtree(session, ignore_errors=True)
 
+    if ctx['admin']:
+        # An upload of our own is not one of the slots handed to someone else.
+        return {'ok': True, 'name': target.name, 'stored': target.name,
+                'remaining': 0, 'closed': False}
     state = store.count_upload()
     return {
         'ok': True,
@@ -176,6 +195,8 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse  # noqa:
 import shares  # noqa: E402
 
 PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://up.t1mo.dev').rstrip('/')
+# Where the one-shot upload link points: the static page on GitHub Pages.
+LINK_BASE = os.environ.get('PORTAL_LINK_BASE', 'https://upload.t1mo.dev').rstrip('/')
 VIEWER = Path(__file__).with_name('viewer.html')
 READ_CHUNK = 256 * 1024
 
@@ -255,7 +276,7 @@ def _meta(token: str, entry: dict, path: Path) -> dict:
         'mime': shares.mime_of(path.name),
         'playable': shares.playable(path.name) if kind == 'video' else True,
         'base': f'{PUBLIC_BASE}/s/{token}',
-        'hasThumb': shares.thumbnail(token, path) is not None,
+        'hasThumb': shares.thumbnail(path) is not None,
     }
     data.update(shares.probe(path))
     return data
@@ -284,7 +305,7 @@ def share_download(request: Request, token: str = PathParam(...)) -> Response:
 def share_preview(request: Request, token: str = PathParam(...)) -> Response:
     """An image the browser can actually paint - HEIC becomes JPEG here."""
     _entry, path = _share_or_404(token)
-    rendition = shares.preview_image(token, path)
+    rendition = shares.preview_image(path)
     if not rendition:
         raise HTTPException(status_code=415, detail='Keine Vorschau moeglich')
     mime = 'image/jpeg' if rendition != path else shares.mime_of(path.name)
@@ -294,7 +315,7 @@ def share_preview(request: Request, token: str = PathParam(...)) -> Response:
 @app.get('/s/{token}/thumb')
 def share_thumb(request: Request, token: str = PathParam(...)) -> Response:
     _entry, path = _share_or_404(token)
-    thumb = shares.thumbnail(token, path)
+    thumb = shares.thumbnail(path)
     if not thumb:
         raise HTTPException(status_code=404, detail='Kein Vorschaubild')
     return _serve_file(thumb, request, 'image/jpeg', max_age=86400)
@@ -330,3 +351,166 @@ def share_page(request: Request, token: str = PathParam(...)) -> HTMLResponse:
 def _escape(text: str) -> str:
     return (str(text).replace('&', '&amp;').replace('<', '&lt;')
             .replace('>', '&gt;').replace('"', '&quot;'))
+
+
+# --------------------------------------------------------------------------
+# Dashboard: everything the owner needs, without touching the Pi.
+# --------------------------------------------------------------------------
+
+ADMIN = Path(__file__).with_name('admin.html')
+
+
+def _require_admin(request: Request) -> None:
+    if not auth.enabled():
+        raise HTTPException(status_code=503,
+                            detail='PORTAL_ADMIN_PASSWORD ist nicht gesetzt')
+    if not auth.valid(request.cookies.get(auth.COOKIE)):
+        raise HTTPException(status_code=401, detail='nicht angemeldet')
+
+
+def _safe_incoming(name: str) -> Path:
+    """Resolve a name from the dashboard back to a file we own."""
+    path = store.INCOMING_DIR / os.path.basename(str(name or ''))
+    try:
+        path.resolve().relative_to(store.INCOMING_DIR.resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail='ungueltiger Name')
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail='Datei nicht gefunden')
+    return path
+
+
+@app.get('/admin', response_class=HTMLResponse)
+def admin_page() -> HTMLResponse:
+    return HTMLResponse(ADMIN.read_text(encoding='utf-8'),
+                        headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/admin/api/login')
+async def admin_login(request: Request) -> Response:
+    if not auth.enabled():
+        raise HTTPException(status_code=503, detail='Kein Passwort konfiguriert')
+    if auth.throttled():
+        raise HTTPException(status_code=429, detail='Zu viele Versuche, kurz warten')
+    body = await request.json()
+    if not auth.check_password(str(body.get('password', ''))):
+        raise HTTPException(status_code=401, detail='Passwort stimmt nicht')
+    response = JSONResponse({'ok': True})
+    response.set_cookie(auth.COOKIE, auth.issue(), max_age=auth.MAX_AGE,
+                        httponly=True, secure=True, samesite='lax', path='/')
+    return response
+
+
+@app.post('/admin/api/logout')
+def admin_logout() -> Response:
+    response = JSONResponse({'ok': True})
+    response.delete_cookie(auth.COOKIE, path='/')
+    return response
+
+
+@app.get('/admin/api/state')
+def admin_state(request: Request) -> dict:
+    authed = auth.enabled() and auth.valid(request.cookies.get(auth.COOKIE))
+    if not authed:
+        return {'authed': False, 'configured': auth.enabled()}
+    state = store.read()
+    return {
+        'authed': True,
+        'configured': True,
+        'chunkSize': store.CHUNK_SIZE,
+        'inbox': {
+            'active': bool(state['active'] and state['token']),
+            'link': f"{LINK_BASE}/#{state['token']}" if state['active'] and state['token'] else None,
+            'remaining': store.remaining(state),
+            'maxFiles': state['maxFiles'],
+        },
+    }
+
+
+@app.get('/admin/api/files')
+def admin_files(request: Request) -> dict:
+    _require_admin(request)
+    store.ensure_dirs()
+    by_file: dict[str, str] = {}
+    for tok, entry in shares.read().items():
+        by_file.setdefault(entry['file'], tok)
+
+    items = []
+    for f in sorted(store.INCOMING_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
+        if not f.is_file():
+            continue
+        token = by_file.get(f.name)
+        items.append({
+            'stored': f.name,
+            'name': shares.display_name(f.name),
+            'size': f.stat().st_size,
+            'modified': int(f.stat().st_mtime),
+            'kind': shares.kind_of(f.name),
+            'share': f'{PUBLIC_BASE}/s/{token}' if token else None,
+            'token': token,
+            'thumb': f'/admin/api/thumb/{quote(f.name)}',
+        })
+    return {'files': items}
+
+
+@app.get('/admin/api/thumb/{name:path}')
+def admin_thumb(request: Request, name: str) -> Response:
+    _require_admin(request)
+    path = _safe_incoming(name)
+    thumb = shares.thumbnail(path)
+    if not thumb:
+        raise HTTPException(status_code=404, detail='Kein Vorschaubild')
+    return _serve_file(thumb, request, 'image/jpeg', max_age=86400)
+
+
+@app.post('/admin/api/share')
+async def admin_share(request: Request) -> dict:
+    _require_admin(request)
+    body = await request.json()
+    path = _safe_incoming(body.get('file'))
+    for tok, entry in shares.read().items():
+        if entry['file'] == path.name:
+            return {'link': f'{PUBLIC_BASE}/s/{tok}', 'token': tok, 'reused': True}
+    days = body.get('days')
+    entry = shares.create(path.name, int(days) if days else None)
+    shares.thumbnail(path)
+    return {'link': f"{PUBLIC_BASE}/s/{entry['token']}", 'token': entry['token'], 'reused': False}
+
+
+@app.post('/admin/api/unshare')
+async def admin_unshare(request: Request) -> dict:
+    _require_admin(request)
+    body = await request.json()
+    return {'ok': shares.revoke(str(body.get('token', '')))}
+
+
+@app.post('/admin/api/delete')
+async def admin_delete(request: Request) -> dict:
+    _require_admin(request)
+    body = await request.json()
+    path = _safe_incoming(body.get('file'))
+    for tok, entry in shares.read().items():
+        if entry['file'] == path.name:
+            shares.revoke(tok)
+    for leftover in shares.THUMB_DIR.glob(f'{shares.cache_key(path)}*'):
+        leftover.unlink(missing_ok=True)
+    path.unlink()
+    return {'ok': True}
+
+
+@app.post('/admin/api/inbox')
+async def admin_inbox_open(request: Request) -> dict:
+    """Open the one-shot link meant for someone else to upload through."""
+    _require_admin(request)
+    body = await request.json()
+    files = max(1, min(20, int(body.get('files', 1))))
+    gigabytes = float(body.get('maxGb', 2))
+    state = store.open_session(files, int(gigabytes * 1024 ** 3), True, '')
+    return {'link': f"{LINK_BASE}/#{state['token']}", 'remaining': store.remaining(state)}
+
+
+@app.post('/admin/api/inbox/close')
+def admin_inbox_close(request: Request) -> dict:
+    _require_admin(request)
+    store.close_session()
+    return {'ok': True}
