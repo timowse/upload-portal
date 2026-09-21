@@ -1,19 +1,5 @@
 {
-  "active": false,
+  "backendUrl": "https://up.t1mo.dev",
   "title": "Schneller Datei-Link",
-  "lede": "Ein sauberer, iPhone-tauglicher Upload-Link auf Abruf.",
-  "summary": "Zurzeit ist kein Upload freigeschaltet.",
-  "backendUrl": "",
-  "method": "POST",
-  "multiFile": true,
-  "maxFiles": 1,
-  "autoClose": true,
-  "path": "/",
-  "label": "geschlossen",
-  "options": [
-    ["Modus", "mehrere Dateien"],
-    ["Max. Uploads", "1"],
-    ["Auto-Close", "ja"],
-    ["Backend", "nicht gesetzt"]
-  ]
+  "lede": "Ein sauberer, iPhone-tauglicher Upload-Link auf Abruf."
 }

@@ -5,8 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="light" />
   <meta name="theme-color" content="#f4f6fb" />
+  <meta name="robots" content="noindex, nofollow" />
   <title>Upload Portal</title>
   <style>
+
     :root {
       --bg: #f4f6fb;
       --card: rgba(255,255,255,.92);
@@ -269,15 +271,20 @@
       .panel-top { flex-direction: column; }
       .content, .header { padding-left: 18px; padding-right: 18px; }
     }
+    .drop .actions { position: relative; z-index: 2; }
+    .drop.done .icon { background: #dcfce7; color: #166534; }
+    .drop.done { border-color: #86efac; border-style: solid; }
+    .err { color: #991b1b; }
+
   </style>
 </head>
 <body>
   <main class="shell">
     <section class="card">
       <div class="header">
-        <div id="kicker" class="kicker closed"><span class="dot"></span><span id="kicker-text">Wird geladen</span></div>
+        <div id="kicker" class="kicker closed"><span class="dot"></span><span id="kicker-text">Wird geprüft</span></div>
         <h1 id="title">Upload Portal</h1>
-        <p id="lede" class="lede">Ladezustand wird geprüft…</p>
+        <p id="lede" class="lede">Zustand wird geprüft…</p>
       </div>
 
       <div class="content">
@@ -285,31 +292,39 @@
           <div class="panel-top">
             <div>
               <div id="badge" class="badge off"><span class="mini"></span><span id="badge-text">geschlossen</span></div>
-              <div id="summary" class="summary" style="margin-top: 10px;">Keine aktive Freigabe gefunden.</div>
+              <div id="summary" class="summary" style="margin-top: 10px;">Zustand wird beim Server abgefragt…</div>
             </div>
-            <div class="summary mono" id="endpoint-box">URL: /config.json</div>
+            <div class="summary mono" id="endpoint-box">—</div>
           </div>
 
           <div class="grid">
             <div class="box">
               <h2>Upload</h2>
-              <form id="form" class="drop hidden" method="POST" enctype="multipart/form-data">
-                <input id="file" type="file" name="file" required />
+
+              <form id="form" class="drop hidden">
+                <input id="file" type="file" />
                 <div class="icon">↑</div>
                 <h3 id="drop-title">Datei auswählen oder hier ablegen</h3>
                 <p id="drop-copy">Kein Login, kein Zwangs-Refresh — nur ein sauberer Upload-Link.</p>
                 <div class="filename" id="fname">Noch keine Datei ausgewählt</div>
                 <div class="progress"><div id="bar" class="bar"></div></div>
                 <div class="actions">
-                  <button id="submit" type="submit" disabled>Datei hochladen</button>
-                  <div class="hint" id="hint">Aktiviere den Upload, um ihn zu nutzen.</div>
+                  <button id="submit" type="submit" disabled>Hochladen</button>
+                  <div class="hint" id="hint">Wähle eine Datei aus.</div>
                 </div>
                 <div class="statusline" id="statusline"></div>
               </form>
+
               <div id="closed-state" class="drop">
                 <div class="icon">⦸</div>
-                <h3>Gerade nicht aktiv</h3>
-                <p>Der Link ist vorbereitet, aber zurzeit nicht freigeschaltet. Sobald der Pi ihn aktiviert, erscheint hier das Upload-Formular.</p>
+                <h3 id="closed-title">Gerade nicht aktiv</h3>
+                <p id="closed-copy">Dieser Link ist zurzeit nicht freigeschaltet.</p>
+              </div>
+
+              <div id="done-state" class="drop done hidden">
+                <div class="icon">✓</div>
+                <h3 id="done-title">Upload abgeschlossen</h3>
+                <p id="done-copy">Danke, die Datei ist angekommen.</p>
               </div>
             </div>
 
@@ -322,133 +337,246 @@
       </div>
 
       <div class="footer">
-        <div>GitHub Pages · eigenes Branding · klarer Direktlink</div>
-        <div class="mono" id="footer-path">/</div>
+        <div>Dateien gehen direkt auf den Pi, ohne Zwischenstation.</div>
+        <div class="mono" id="footer-note">—</div>
       </div>
     </section>
   </main>
 
   <script>
-    const state = {
-      active: false,
-      title: 'Upload Portal',
-      lede: 'Ladezustand wird geprüft…',
-      summary: '',
-      backendUrl: '',
-      method: 'POST',
-      multiFile: false,
-      maxFiles: 1,
-      autoClose: true,
-      path: '/',
-      label: 'geschlossen',
-      options: []
+    // The link that gets handed out carries the session token in its
+    // fragment: https://upload.t1mo.dev/#<token>. A fragment is never sent
+    // to a server, so GitHub Pages never sees it - only the Pi does, and
+    // only because we put it in the query string of our own API calls.
+    const TOKEN = decodeURIComponent(location.hash.replace(/^#/, '')).trim();
+
+    const els = {};
+    for (const id of ['kicker', 'kicker-text', 'title', 'lede', 'badge', 'badge-text',
+                      'summary', 'endpoint-box', 'options', 'form', 'file', 'fname',
+                      'submit', 'hint', 'bar', 'statusline', 'closed-state', 'closed-title',
+                      'closed-copy', 'done-state', 'done-copy', 'drop-title', 'drop-copy',
+                      'footer-note']) {
+      els[id] = document.getElementById(id);
+    }
+
+    let cfg = {};
+    let status = { active: false };
+    let busy = false;
+
+    const fmt = (n) => {
+      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      let v = Number(n) || 0, i = 0;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
     };
 
-    const els = {
-      kicker: document.getElementById('kicker'),
-      kickerText: document.getElementById('kicker-text'),
-      title: document.getElementById('title'),
-      lede: document.getElementById('lede'),
-      badge: document.getElementById('badge'),
-      badgeText: document.getElementById('badge-text'),
-      summary: document.getElementById('summary'),
-      endpointBox: document.getElementById('endpoint-box'),
-      options: document.getElementById('options'),
-      form: document.getElementById('form'),
-      file: document.getElementById('file'),
-      fname: document.getElementById('fname'),
-      submit: document.getElementById('submit'),
-      hint: document.getElementById('hint'),
-      bar: document.getElementById('bar'),
-      statusline: document.getElementById('statusline'),
-      closedState: document.getElementById('closed-state'),
-      dropTitle: document.getElementById('drop-title'),
-      dropCopy: document.getElementById('drop-copy'),
-      footerPath: document.getElementById('footer-path')
-    };
-
-    function setBadge(active) {
+    function setMode(mode) {
+      const active = mode === 'open';
       els.kicker.className = 'kicker ' + (active ? 'active' : 'closed');
-      els.kickerText.textContent = active ? 'Freigabe aktiv' : 'Geschlossen';
+      els['kicker-text'].textContent = active ? 'Freigabe aktiv' : 'Geschlossen';
       els.badge.className = 'badge ' + (active ? 'on' : 'off');
-      els.badgeText.textContent = active ? 'aktiv' : 'geschlossen';
+      els['badge-text'].textContent = active ? 'aktiv' : 'geschlossen';
       document.body.classList.toggle('open-mode', active);
+      els.form.classList.toggle('hidden', mode !== 'open');
+      els['closed-state'].classList.toggle('hidden', mode !== 'closed');
+      els['done-state'].classList.toggle('hidden', mode !== 'done');
     }
 
-    function renderOptions(cfg) {
-      const rows = [
-        ['Modus', cfg.multiFile ? 'mehrere Dateien' : 'eine Datei'],
-        ['Max. Uploads', String(cfg.maxFiles || 1)],
-        ['Auto-Close', cfg.autoClose ? 'ja' : 'nein'],
-        ['Backend', cfg.backendUrl ? 'konfiguriert' : 'nicht gesetzt'],
-      ];
-      els.options.innerHTML = rows.map(([label, value]) => `<li><span class="label">${label}</span><span class="value">${value}</span></li>`).join('');
+    function renderOptions() {
+      const rows = status.active
+        ? [['Verbleibend', `${status.remaining} von ${status.maxFiles}`],
+           ['Max. Größe', fmt(status.maxBytes)],
+           ['Auto-Close', status.autoClose ? 'ja' : 'nein'],
+           ['Stückgröße', fmt(status.chunkSize)]]
+        : [['Status', 'geschlossen'], ['Backend', cfg.backendUrl ? 'erreichbar' : 'nicht gesetzt']];
+      els.options.innerHTML = rows
+        .map(([k, v]) => `<li><span class="label">${k}</span><span class="value">${v}</span></li>`)
+        .join('');
     }
 
-    function applyConfig(cfg) {
-      Object.assign(state, cfg || {});
-      const active = Boolean(state.active && state.backendUrl);
-      setBadge(active);
-      els.title.textContent = state.title || 'Upload Portal';
-      els.lede.textContent = state.lede || 'Upload auf Abruf.';
-      els.summary.textContent = state.summary || (active ? 'Upload ist freigeschaltet.' : 'Keine aktive Freigabe gefunden.');
-      els.endpointBox.textContent = 'URL: ' + (state.path || '/');
-      els.footerPath.textContent = state.path || '/';
-      renderOptions(state);
+    function render() {
+      els.title.textContent = cfg.title || 'Upload Portal';
+      els.lede.textContent = cfg.lede || 'Upload auf Abruf.';
+      els['endpoint-box'].textContent = cfg.backendUrl || 'Backend nicht gesetzt';
 
-      if (active) {
-        els.closedState.classList.add('hidden');
-        els.form.classList.remove('hidden');
-        els.form.action = state.backendUrl;
-        els.file.multiple = Boolean(state.multiFile);
-        els.dropTitle.textContent = state.multiFile ? 'Dateien auswählen oder hier ablegen' : 'Datei auswählen oder hier ablegen';
-        els.dropCopy.textContent = state.multiFile ? 'Mehrere Dateien sind in diesem Modus erlaubt.' : 'Nur eine Datei ist in diesem Modus erlaubt.';
-        els.hint.textContent = state.autoClose ? 'Nach dem erfolgreichen Upload schließt die Seite automatisch.' : 'Nach dem Upload bleibt die Seite offen.';
+      if (status.active) {
+        setMode('open');
+        const multi = status.remaining > 1;
+        els.file.multiple = multi;
+        els['drop-title'].textContent = multi ? 'Dateien auswählen oder hier ablegen'
+                                              : 'Datei auswählen oder hier ablegen';
+        els['drop-copy'].textContent = multi
+          ? `Noch ${status.remaining} Uploads frei, maximal ${fmt(status.maxBytes)} pro Datei.`
+          : `Ein Upload frei, maximal ${fmt(status.maxBytes)}.`;
+        els.summary.textContent = status.note
+          || 'Upload ist freigeschaltet. Nach dem letzten Upload schließt sich der Link von selbst.';
+        els.hint.textContent = status.autoClose
+          ? 'Der Link schließt sich nach dem letzten Upload.'
+          : 'Der Link bleibt nach dem Upload offen.';
+        els['footer-note'].textContent = `${status.remaining} frei`;
       } else {
-        els.closedState.classList.remove('hidden');
-        els.form.classList.add('hidden');
+        setMode('closed');
+        els.summary.textContent = TOKEN
+          ? 'Dieser Link ist abgelaufen oder wurde bereits benutzt.'
+          : 'Ohne gültigen Freigabe-Link ist hier nichts zu tun.';
+        els['closed-copy'].textContent = TOKEN
+          ? 'Der Link war einmalig gültig. Frag nach einem neuen, wenn du noch etwas schicken möchtest.'
+          : 'Dieser Link wird erst aktiv, wenn eine Freigabe geöffnet wurde.';
+        els['footer-note'].textContent = 'geschlossen';
+      }
+      renderOptions();
+    }
+
+    function say(text, isError) {
+      els.statusline.textContent = text || '';
+      els.statusline.classList.toggle('err', Boolean(isError));
+    }
+
+    function progress(fraction) {
+      els.bar.style.width = Math.max(0, Math.min(1, fraction)) * 100 + '%';
+    }
+
+    async function api(path, options) {
+      const r = await fetch(cfg.backendUrl.replace(/\/$/, '') + path, options);
+      if (!r.ok) {
+        let detail = `HTTP ${r.status}`;
+        try { detail = (await r.json()).detail || detail; } catch (_) {}
+        throw new Error(detail);
+      }
+      return r.json();
+    }
+
+    // Each chunk goes up with XHR rather than fetch, because only XHR
+    // reports how much of the request body has left the device.
+    function putChunk(url, blob, onProgress) {
+      return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('PUT', url);
+        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+        xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) return resolve();
+          let detail = `HTTP ${xhr.status}`;
+          try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (_) {}
+          reject(new Error(detail));
+        };
+        xhr.onerror = () => reject(new Error('Verbindung unterbrochen'));
+        xhr.send(blob);
+      });
+    }
+
+    async function uploadOne(file, index, total) {
+      const label = total > 1 ? `Datei ${index + 1} von ${total}: ` : '';
+      const init = await api(`/api/upload/init?t=${encodeURIComponent(TOKEN)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: file.name, size: file.size })
+      });
+
+      const chunkSize = init.chunkSize;
+      const chunks = Math.max(1, Math.ceil(file.size / chunkSize));
+      let sent = 0;
+
+      for (let i = 0; i < chunks; i++) {
+        const blob = file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, file.size));
+        const base = sent;
+        say(`${label}Teil ${i + 1} von ${chunks} wird gesendet…`);
+        await putChunk(
+          `${cfg.backendUrl.replace(/\/$/, '')}/api/upload/part?t=${encodeURIComponent(TOKEN)}` +
+          `&id=${encodeURIComponent(init.uploadId)}&i=${i}`,
+          blob,
+          (loaded) => progress((base + loaded) / file.size)
+        );
+        sent += blob.size;
+        progress(sent / file.size);
+      }
+
+      return api(`/api/upload/done?t=${encodeURIComponent(TOKEN)}&id=${encodeURIComponent(init.uploadId)}`,
+                 { method: 'POST' });
+    }
+
+    async function runUpload(files) {
+      busy = true;
+      els.submit.disabled = true;
+      els.file.disabled = true;
+      let last = null;
+      try {
+        for (let i = 0; i < files.length; i++) {
+          progress(0);
+          last = await uploadOne(files[i], i, files.length);
+        }
+        progress(1);
+        els['done-copy'].textContent = last && last.closed
+          ? 'Danke, alles angekommen. Der Link ist jetzt geschlossen.'
+          : `Danke, angekommen. Es sind noch ${last ? last.remaining : 0} Uploads frei.`;
+        setMode('done');
+        say('');
+      } catch (err) {
+        progress(0);
+        say(err.message || 'Upload fehlgeschlagen', true);
+        els.file.disabled = false;
+        els.submit.disabled = false;
+        await refresh();
+      } finally {
+        busy = false;
       }
     }
 
-    function updateFileLabel() {
+    function updateSelection() {
       const files = els.file.files ? Array.from(els.file.files) : [];
       if (!files.length) {
         els.fname.textContent = 'Noch keine Datei ausgewählt';
         els.submit.disabled = true;
         return;
       }
-      els.fname.textContent = files.map(f => `${f.name} · ${Math.max(1, Math.round(f.size / 1024))} KB`).join(' | ');
+      if (files.length > status.remaining) {
+        els.fname.textContent = `${files.length} Dateien gewählt, aber nur ${status.remaining} frei`;
+        els.submit.disabled = true;
+        say(`Bitte höchstens ${status.remaining} Dateien auswählen.`, true);
+        return;
+      }
+      const tooBig = files.find((f) => f.size > status.maxBytes);
+      if (tooBig) {
+        els.fname.textContent = `${tooBig.name} ist zu groß (${fmt(tooBig.size)})`;
+        els.submit.disabled = true;
+        say(`Maximal ${fmt(status.maxBytes)} pro Datei.`, true);
+        return;
+      }
+      els.fname.textContent = files.map((f) => `${f.name} · ${fmt(f.size)}`).join(' | ');
       els.submit.disabled = false;
+      say('');
     }
 
-    els.file.addEventListener('change', updateFileLabel);
-    els.form.addEventListener('submit', () => {
-      els.submit.disabled = true;
-      els.submit.textContent = 'Lade hoch…';
-      els.bar.style.width = '72%';
-      els.statusline.textContent = 'Upload wird gesendet…';
+    els.file.addEventListener('change', updateSelection);
+    els.form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      if (busy) return;
+      const files = els.file.files ? Array.from(els.file.files) : [];
+      if (files.length) runUpload(files);
     });
 
-    async function loadConfig() {
+    async function refresh() {
+      if (!cfg.backendUrl) { status = { active: false }; render(); return; }
       try {
-        const r = await fetch('config.json?ts=' + Date.now(), { cache: 'no-store' });
-        if (!r.ok) throw new Error('config.json ' + r.status);
-        const cfg = await r.json();
-        applyConfig(cfg);
+        status = await api(`/api/status?t=${encodeURIComponent(TOKEN)}`, { cache: 'no-store' });
       } catch (err) {
-        applyConfig({
-          active: false,
-          title: 'Upload Portal',
-          lede: 'Konfiguration nicht erreichbar.',
-          summary: 'Es ist gerade keine freigegebene Konfiguration verfügbar.',
-          path: '/',
-          options: []
-        });
-        els.statusline.textContent = 'config.json konnte nicht geladen werden.';
+        status = { active: false };
+        say('Server nicht erreichbar.', true);
       }
+      render();
     }
 
-    loadConfig();
+    async function boot() {
+      try {
+        const r = await fetch('config.json?ts=' + Date.now(), { cache: 'no-store' });
+        cfg = await r.json();
+      } catch (_) {
+        cfg = {};
+      }
+      await refresh();
+    }
+
+    boot();
   </script>
 </body>
 </html>
