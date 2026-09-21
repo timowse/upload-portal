@@ -1,27 +1,49 @@
-"""Upload endpoint for the portal.
+"""A public file drop.
 
-The browser never posts a whole file in one request. It asks for an upload
-slot, pushes the file in chunks that stay under Cloudflare's proxied body
-limit, and then asks the server to finalise it. Every limit the portal
-advertises is enforced here, because the page in front of it cannot
-enforce anything a direct POST could not skip.
+Anyone may upload; the answer is a link to hand over. Files delete
+themselves after a while, which is what keeps an open service from
+growing without bound.
+
+Nothing here authenticates a caller, so the ceilings matter: a size
+limit, a floor of free disk that uploads may not eat into, and a cap on
+how many uploads one address may start per hour.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import re
 import shutil
+import time
+from collections import defaultdict, deque
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 
-import auth
-import store
+import db
+import media
 
-ADMIN_MAX_BYTES = 16 * 1024 ** 3
 ALLOWED_ORIGIN = os.environ.get('PORTAL_ORIGIN', 'https://upload.t1mo.dev')
+PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://up.t1mo.dev').rstrip('/')
+UPLOADS_PER_HOUR = int(os.environ.get('PORTAL_UPLOADS_PER_HOUR', '30'))
+READ_CHUNK = 256 * 1024
+
+HERE = Path(__file__).parent
+
+
+def _page(name: str) -> Path:
+    """In the image everything sits together; in a checkout index.html is
+    one level up, where GitHub Pages serves it from."""
+    here = HERE / name
+    return here if here.exists() else HERE.parent / name
+
+
+VIEWER = _page('viewer.html')
+UPLOAD_PAGE = _page('index.html')
 
 app = FastAPI(title='Upload Portal', docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(
@@ -32,30 +54,48 @@ app.add_middleware(
     max_age=600,
 )
 
-
-def _session_dir(upload_id: str) -> Path:
-    if not store.SAFE_ID.match(upload_id):
-        raise HTTPException(status_code=400, detail='ungueltige Upload-ID')
-    return store.TMP_DIR / upload_id
+_recent: dict[str, deque] = defaultdict(deque)
 
 
-def _require_open(token: str | None) -> dict:
-    state = store.read()
-    if not store.is_open(state, token):
-        raise HTTPException(status_code=403, detail='keine aktive Freigabe')
-    return state
+def _caller(request: Request) -> str:
+    """Cloudflare puts the real address here; the socket shows the tunnel."""
+    return (request.headers.get('cf-connecting-ip')
+            or request.headers.get('x-forwarded-for', '').split(',')[0].strip()
+            or (request.client.host if request.client else 'unbekannt'))
 
 
-def _upload_ctx(request: Request, token: str | None) -> dict:
-    """Who may upload right now, and under which ceiling.
+def _rate_limit(request: Request) -> None:
+    now = time.time()
+    seen = _recent[_caller(request)]
+    while seen and now - seen[0] > 3600:
+        seen.popleft()
+    if len(seen) >= UPLOADS_PER_HOUR:
+        raise HTTPException(status_code=429,
+                            detail='Zu viele Uploads in kurzer Zeit. Später nochmal.')
+    seen.append(now)
+    if len(_recent) > 5000:                      # keep the bookkeeping bounded
+        for key in [k for k, v in _recent.items() if not v][:1000]:
+            _recent.pop(key, None)
 
-    The dashboard uploads with a signed cookie and does not spend a slot of
-    the one-shot session meant for other people.
-    """
-    if auth.enabled() and auth.valid(request.cookies.get(auth.COOKIE)):
-        return {'maxBytes': ADMIN_MAX_BYTES, 'admin': True}
-    state = _require_open(token)
-    return {'maxBytes': int(state['maxBytes']), 'admin': False}
+
+@app.on_event('startup')
+async def _startup() -> None:
+    db.ensure_dirs()
+    moved = db.migrate()
+    if moved:
+        print(f'{moved} Dateien aus dem alten Layout übernommen')
+
+    async def sweeper() -> None:
+        while True:
+            try:
+                gone = await asyncio.to_thread(db.sweep)
+                if gone:
+                    print(f'{len(gone)} abgelaufene Dateien entfernt')
+            except Exception as err:                       # never kill the loop
+                print(f'Aufräumen fehlgeschlagen: {err}')
+            await asyncio.sleep(3600)
+
+    asyncio.create_task(sweeper())
 
 
 @app.get('/healthz')
@@ -63,63 +103,69 @@ def healthz() -> dict:
     return {'ok': True}
 
 
-@app.get('/api/status')
-def status(t: str | None = Query(default=None)) -> JSONResponse:
-    """Report the session behind this token.
+@app.get('/', response_class=HTMLResponse)
+def home() -> HTMLResponse:
+    """The same page GitHub Pages serves, so both hostnames work alone."""
+    return HTMLResponse(UPLOAD_PAGE.read_text(encoding='utf-8'),
+                        headers={'Cache-Control': 'no-cache'})
 
-    Without a valid token the answer is a flat "closed", so polling the
-    endpoint reveals neither that a session exists nor its limits.
-    """
-    state = store.read()
-    if not store.is_open(state, t):
-        return JSONResponse({'active': False})
-    return JSONResponse({
-        'active': True,
-        'maxFiles': state['maxFiles'],
-        'remaining': store.remaining(state),
-        'maxBytes': state['maxBytes'],
-        'autoClose': state['autoClose'],
-        'chunkSize': store.CHUNK_SIZE,
-        'note': state['note'],
-    })
+
+@app.get('/api/config')
+def config() -> dict:
+    return {
+        'chunkSize': db.CHUNK_SIZE,
+        'maxBytes': db.MAX_BYTES,
+        'days': db.DEFAULT_DAYS,
+        'maxDays': db.MAX_DAYS,
+        'accepting': db.accepting(0),
+        'base': PUBLIC_BASE,
+    }
+
+
+# ----------------------------------------------------------------- upload
+
+def _session_dir(upload_id: str) -> Path:
+    if not db.SAFE_ID.match(upload_id or ''):
+        raise HTTPException(status_code=400, detail='ungültige Upload-ID')
+    return db.TMP_DIR / upload_id
 
 
 @app.post('/api/upload/init')
-async def upload_init(request: Request, t: str | None = Query(default=None)) -> dict:
-    ctx = _upload_ctx(request, t)
+async def upload_init(request: Request) -> dict:
+    _rate_limit(request)
     try:
         body = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail='ungueltiger Request')
+        raise HTTPException(status_code=400, detail='ungültiger Request')
 
-    name = store.safe_filename(body.get('name'))
     try:
         size = int(body.get('size'))
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail='Groesse fehlt')
+        raise HTTPException(status_code=400, detail='Größe fehlt')
     if size <= 0:
-        raise HTTPException(status_code=400, detail='leere Datei')
-    if size > ctx['maxBytes']:
-        raise HTTPException(status_code=413, detail='Datei ueberschreitet das Limit')
+        raise HTTPException(status_code=400, detail='Die Datei ist leer')
+    if size > db.MAX_BYTES:
+        raise HTTPException(status_code=413,
+                            detail=f'Maximal {db.MAX_BYTES // 1024 ** 3} GB pro Datei')
+    if not db.accepting(size):
+        raise HTTPException(status_code=507, detail='Kein Platz mehr frei')
 
-    upload_id = store.new_token()
-    session = store.TMP_DIR / upload_id
+    days = body.get('days')
+    upload_id = db.token(12)
+    session = _session_dir(upload_id)
     session.mkdir(parents=True, exist_ok=True)
-    (session / 'meta.json').write_text(
-        json.dumps({'name': name, 'size': size, 'received': 0, 'nextIndex': 0}),
-        encoding='utf-8',
-    )
-    return {'uploadId': upload_id, 'chunkSize': store.CHUNK_SIZE, 'name': name}
+    (session / 'meta.json').write_text(json.dumps({
+        'name': db.safe_name(body.get('name')),
+        'size': size,
+        'days': int(days) if days else db.DEFAULT_DAYS,
+        'received': 0,
+        'nextIndex': 0,
+    }), encoding='utf-8')
+    return {'uploadId': upload_id, 'chunkSize': db.CHUNK_SIZE}
 
 
 @app.put('/api/upload/part')
-async def upload_part(
-    request: Request,
-    t: str | None = Query(default=None),
-    id: str = Query(...),
-    i: int = Query(...),
-) -> dict:
-    ctx = _upload_ctx(request, t)
+async def upload_part(request: Request, id: str = Query(...), i: int = Query(...)) -> dict:
     session = _session_dir(id)
     meta_path = session / 'meta.json'
     if not meta_path.exists():
@@ -127,21 +173,19 @@ async def upload_part(
 
     meta = json.loads(meta_path.read_text(encoding='utf-8'))
     if i != meta['nextIndex']:
-        raise HTTPException(status_code=409, detail=f"Chunk {meta['nextIndex']} erwartet")
+        raise HTTPException(status_code=409, detail=f"Teil {meta['nextIndex']} erwartet")
 
     received = int(meta['received'])
-    limit = min(int(meta['size']), ctx['maxBytes'])
-    part_path = session / 'data.part'
-
-    # Append while streaming so a large chunk never has to fit in memory,
-    # and stop the moment the client sends more than it declared.
-    with open(part_path, 'ab') as fh:
+    part = session / 'data.part'
+    # Append while streaming, so a 32 MB chunk never has to fit in memory,
+    # and stop the moment more arrives than was announced.
+    with open(part, 'ab') as fh:
         async for chunk in request.stream():
             received += len(chunk)
-            if received > limit:
+            if received > int(meta['size']):
                 fh.close()
                 shutil.rmtree(session, ignore_errors=True)
-                raise HTTPException(status_code=413, detail='mehr Daten als angekuendigt')
+                raise HTTPException(status_code=413, detail='mehr Daten als angekündigt')
             fh.write(chunk)
 
     meta['received'] = received
@@ -151,70 +195,46 @@ async def upload_part(
 
 
 @app.post('/api/upload/done')
-def upload_done(request: Request, t: str | None = Query(default=None),
-                id: str = Query(...)) -> dict:
-    ctx = _upload_ctx(request, t)
+def upload_done(id: str = Query(...)) -> dict:
     session = _session_dir(id)
     meta_path = session / 'meta.json'
     if not meta_path.exists():
         raise HTTPException(status_code=404, detail='Upload nicht gefunden')
 
     meta = json.loads(meta_path.read_text(encoding='utf-8'))
-    part_path = session / 'data.part'
-    if not part_path.exists() or part_path.stat().st_size != int(meta['size']):
+    part = session / 'data.part'
+    if not part.exists() or part.stat().st_size != int(meta['size']):
         shutil.rmtree(session, ignore_errors=True)
-        raise HTTPException(status_code=400, detail='Upload unvollstaendig')
+        raise HTTPException(status_code=400, detail='Upload unvollständig')
 
-    target = store.unique_target(meta['name'])
-    os.replace(part_path, target)
+    entry = db.add_file(meta['name'], meta['size'], meta.get('days'))
+    os.replace(part, db.blob(entry['id']))
     shutil.rmtree(session, ignore_errors=True)
-
-    if ctx['admin']:
-        # An upload of our own is not one of the slots handed to someone else.
-        return {'ok': True, 'name': target.name, 'stored': target.name,
-                'remaining': 0, 'closed': False}
-    state = store.count_upload()
+    media.thumbnail(entry['id'], entry['name'])          # ready for the first visitor
     return {
         'ok': True,
-        'name': target.name,
-        'remaining': store.remaining(state),
-        'closed': not state['active'],
+        'name': entry['name'],
+        'link': f"{PUBLIC_BASE}/s/{entry['share']}",
+        'expires': entry['expires'],
+        'days': round((entry['expires'] - entry['uploaded']) / 86400),
     }
 
 
-# --------------------------------------------------------------------------
-# Sharing: a link that shows the file rather than just handing it over.
-# --------------------------------------------------------------------------
-
-import re  # noqa: E402
-from urllib.parse import quote  # noqa: E402
-
-from fastapi import Path as PathParam  # noqa: E402
-from fastapi.responses import HTMLResponse, Response, StreamingResponse  # noqa: E402
-
-import shares  # noqa: E402
-
-PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://up.t1mo.dev').rstrip('/')
-# Where the one-shot upload link points: the static page on GitHub Pages.
-LINK_BASE = os.environ.get('PORTAL_LINK_BASE', 'https://upload.t1mo.dev').rstrip('/')
-VIEWER = Path(__file__).with_name('viewer.html')
-READ_CHUNK = 256 * 1024
-
+# ------------------------------------------------------------------ share
 
 def _disposition(name: str, download: bool) -> str:
-    """Give plain clients an ASCII name and capable ones the real one."""
     ascii_name = re.sub(r'[^\x20-\x7e]', '_', name).replace('"', '')
     return (f'{"attachment" if download else "inline"}; filename="{ascii_name}"; '
             f"filename*=UTF-8''{quote(name)}")
 
 
-def _serve_file(path: Path, request: Request, mime: str, *, download: bool = False,
-                max_age: int = 3600, name: str | None = None) -> Response:
+def _serve(path: Path, request: Request, mime: str, name: str, *,
+           download: bool = False, max_age: int = 3600) -> Response:
     """Serve a file with byte ranges.
 
-    Safari will not play a video at all unless the server answers a range
-    request with 206, and seeking in any browser depends on it, so this is
-    not an optimisation.
+    Safari will not start a video at all unless a range request is answered
+    with 206, and seeking depends on it everywhere, so this is required
+    rather than an optimisation.
     """
     stat = path.stat()
     size = stat.st_size
@@ -222,7 +242,7 @@ def _serve_file(path: Path, request: Request, mime: str, *, download: bool = Fal
         'Accept-Ranges': 'bytes',
         'ETag': f'"{int(stat.st_mtime)}-{size}"',
         'Cache-Control': f'private, max-age={max_age}',
-        'Content-Disposition': _disposition(name or path.name, download),
+        'Content-Disposition': _disposition(name, download),
     }
 
     start, end, status = 0, size - 1, 200
@@ -258,259 +278,92 @@ def _serve_file(path: Path, request: Request, mime: str, *, download: bool = Fal
     return StreamingResponse(body(), status_code=status, media_type=mime, headers=headers)
 
 
-def _share_or_404(token: str):
-    found = shares.resolve(token)
+def _target(tok: str) -> dict:
+    found = db.share_target(tok)
     if not found:
         raise HTTPException(status_code=404, detail='Link unbekannt oder abgelaufen')
     return found
 
 
-def _meta(token: str, entry: dict, path: Path) -> dict:
-    kind = shares.kind_of(path.name)
-    stat = path.stat()
-    data = {
-        'name': shares.display_name(path.name),
-        'stored': path.name,
-        'size': stat.st_size,
+def _meta(tok: str, f: dict) -> dict:
+    kind = media.kind_of(f['name'])
+    info = {
+        'name': f['name'],
+        'size': f['size'],
         'kind': kind,
-        'mime': shares.mime_of(path.name),
-        'playable': shares.playable(path.name) if kind == 'video' else True,
-        'base': f'{PUBLIC_BASE}/s/{token}',
-        'hasThumb': shares.thumbnail(path) is not None,
+        'mime': media.mime_of(f['name']),
+        'playable': media.playable(f['name']) if kind == 'video' else True,
+        'base': f'{PUBLIC_BASE}/s/{tok}',
+        'expires': f['expires'],
+        'daysLeft': max(0, round((f['expires'] - time.time()) / 86400)),
+        'hasThumb': media.thumbnail(f['id'], f['name']) is not None,
     }
-    data.update(shares.probe(path))
-    return data
+    info.update(media.probe(f['id'], f['name']))
+    return info
 
 
 @app.get('/s/{token}/meta')
-def share_meta(request: Request, token: str = PathParam(...)) -> dict:
-    entry, path = _share_or_404(token)
-    return _meta(token, entry, path)
+def share_meta(token: str) -> dict:
+    return _meta(token, _target(token))
 
 
 @app.get('/s/{token}/file')
-def share_file(request: Request, token: str = PathParam(...)) -> Response:
-    _entry, path = _share_or_404(token)
-    return _serve_file(path, request, shares.mime_of(path.name))
+def share_file(request: Request, token: str) -> Response:
+    f = _target(token)
+    return _serve(f['path'], request, media.mime_of(f['name']), f['name'])
 
 
 @app.get('/s/{token}/dl')
-def share_download(request: Request, token: str = PathParam(...)) -> Response:
-    _entry, path = _share_or_404(token)
-    return _serve_file(path, request, shares.mime_of(path.name), download=True,
-                       name=shares.display_name(path.name))
+def share_download(request: Request, token: str) -> Response:
+    f = _target(token)
+    return _serve(f['path'], request, media.mime_of(f['name']), f['name'], download=True)
 
 
 @app.get('/s/{token}/preview')
-def share_preview(request: Request, token: str = PathParam(...)) -> Response:
-    """An image the browser can actually paint - HEIC becomes JPEG here."""
-    _entry, path = _share_or_404(token)
-    rendition = shares.preview_image(path)
+def share_preview(request: Request, token: str) -> Response:
+    f = _target(token)
+    rendition = media.preview(f['id'], f['name'])
     if not rendition:
-        raise HTTPException(status_code=415, detail='Keine Vorschau moeglich')
-    mime = 'image/jpeg' if rendition != path else shares.mime_of(path.name)
-    return _serve_file(rendition, request, mime, max_age=86400)
+        raise HTTPException(status_code=415, detail='Keine Vorschau möglich')
+    mime = 'image/jpeg' if rendition != f['path'] else media.mime_of(f['name'])
+    return _serve(rendition, request, mime, f['name'], max_age=86400)
 
 
 @app.get('/s/{token}/thumb')
-def share_thumb(request: Request, token: str = PathParam(...)) -> Response:
-    _entry, path = _share_or_404(token)
-    thumb = shares.thumbnail(path)
+def share_thumb(request: Request, token: str) -> Response:
+    f = _target(token)
+    thumb = media.thumbnail(f['id'], f['name'])
     if not thumb:
         raise HTTPException(status_code=404, detail='Kein Vorschaubild')
-    return _serve_file(thumb, request, 'image/jpeg', max_age=86400)
+    return _serve(thumb, request, 'image/jpeg', f['name'], max_age=86400)
 
 
-@app.get('/s/{token}', response_class=HTMLResponse)
-def share_page(request: Request, token: str = PathParam(...)) -> HTMLResponse:
-    """The viewer itself.
-
-    Rendered here rather than on Pages so that a messenger fetching the URL
-    gets Open Graph tags and a thumbnail, and therefore shows a real preview
-    card instead of a bare link.
-    """
-    entry, path = _share_or_404(token)
-    meta = _meta(token, entry, path)
-    shares.count_view(token)
-
-    og_image = f"{meta['base']}/thumb" if meta['hasThumb'] else ''
-    og_type = {'image': 'article', 'video': 'video.other'}.get(meta['kind'], 'website')
-    html = VIEWER.read_text(encoding='utf-8')
-    for key, value in {
-        '__TITLE__': meta['name'],
-        '__OG_TYPE__': og_type,
-        '__OG_IMAGE__': og_image,
-        '__OG_URL__': meta['base'],
-        '__OG_DESC__': f"{meta['kind']} · {meta['size'] / 1024 / 1024:.1f} MB",
-        '__META__': json.dumps(meta),
-    }.items():
-        html = html.replace(key, value if key == '__META__' else _escape(value))
-    return HTMLResponse(html, headers={'Cache-Control': 'no-store'})
-
-
-def _escape(text: str) -> str:
+def _escape(text: object) -> str:
     return (str(text).replace('&', '&amp;').replace('<', '&lt;')
             .replace('>', '&gt;').replace('"', '&quot;'))
 
 
-# --------------------------------------------------------------------------
-# Dashboard: everything the owner needs, without touching the Pi.
-# --------------------------------------------------------------------------
+@app.get('/s/{token}', response_class=HTMLResponse)
+def share_page(token: str) -> HTMLResponse:
+    """The viewer.
 
-ADMIN = Path(__file__).with_name('admin.html')
+    Rendered here rather than on Pages so a messenger fetching the link
+    gets Open Graph tags and a thumbnail, and shows a preview card instead
+    of a bare URL.
+    """
+    f = _target(token)
+    info = _meta(token, f)
+    db.count_view(token)
 
-
-def _require_admin(request: Request) -> None:
-    if not auth.enabled():
-        raise HTTPException(status_code=503,
-                            detail='PORTAL_ADMIN_PASSWORD ist nicht gesetzt')
-    if not auth.valid(request.cookies.get(auth.COOKIE)):
-        raise HTTPException(status_code=401, detail='nicht angemeldet')
-
-
-def _safe_incoming(name: str) -> Path:
-    """Resolve a name from the dashboard back to a file we own."""
-    path = store.INCOMING_DIR / os.path.basename(str(name or ''))
-    try:
-        path.resolve().relative_to(store.INCOMING_DIR.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail='ungueltiger Name')
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail='Datei nicht gefunden')
-    return path
-
-
-@app.get('/admin', response_class=HTMLResponse)
-def admin_page() -> HTMLResponse:
-    return HTMLResponse(ADMIN.read_text(encoding='utf-8'),
-                        headers={'Cache-Control': 'no-store'})
-
-
-@app.post('/admin/api/login')
-async def admin_login(request: Request) -> Response:
-    if not auth.enabled():
-        raise HTTPException(status_code=503, detail='Kein Passwort konfiguriert')
-    if auth.throttled():
-        raise HTTPException(status_code=429, detail='Zu viele Versuche, kurz warten')
-    body = await request.json()
-    if not auth.check_password(str(body.get('password', ''))):
-        raise HTTPException(status_code=401, detail='Passwort stimmt nicht')
-    response = JSONResponse({'ok': True})
-    response.set_cookie(auth.COOKIE, auth.issue(), max_age=auth.MAX_AGE,
-                        httponly=True, secure=True, samesite='lax', path='/')
-    return response
-
-
-@app.post('/admin/api/logout')
-def admin_logout() -> Response:
-    response = JSONResponse({'ok': True})
-    response.delete_cookie(auth.COOKIE, path='/')
-    return response
-
-
-@app.get('/admin/api/state')
-def admin_state(request: Request) -> dict:
-    authed = auth.enabled() and auth.valid(request.cookies.get(auth.COOKIE))
-    if not authed:
-        return {'authed': False, 'configured': auth.enabled()}
-    state = store.read()
-    return {
-        'authed': True,
-        'configured': True,
-        'chunkSize': store.CHUNK_SIZE,
-        'inbox': {
-            'active': bool(state['active'] and state['token']),
-            'link': f"{LINK_BASE}/#{state['token']}" if state['active'] and state['token'] else None,
-            'remaining': store.remaining(state),
-            'maxFiles': state['maxFiles'],
-        },
+    html = VIEWER.read_text(encoding='utf-8')
+    replacements = {
+        '__TITLE__': info['name'],
+        '__OG_TYPE__': {'image': 'article', 'video': 'video.other'}.get(info['kind'], 'website'),
+        '__OG_IMAGE__': f"{info['base']}/thumb" if info['hasThumb'] else '',
+        '__OG_URL__': info['base'],
+        '__OG_DESC__': f"{info['size'] / 1024 / 1024:.1f} MB · noch {info['daysLeft']} Tage",
+        '__META__': json.dumps(info),
     }
-
-
-@app.get('/admin/api/files')
-def admin_files(request: Request) -> dict:
-    _require_admin(request)
-    store.ensure_dirs()
-    by_file: dict[str, str] = {}
-    for tok, entry in shares.read().items():
-        by_file.setdefault(entry['file'], tok)
-
-    items = []
-    for f in sorted(store.INCOMING_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
-        if not f.is_file():
-            continue
-        token = by_file.get(f.name)
-        items.append({
-            'stored': f.name,
-            'name': shares.display_name(f.name),
-            'size': f.stat().st_size,
-            'modified': int(f.stat().st_mtime),
-            'kind': shares.kind_of(f.name),
-            'share': f'{PUBLIC_BASE}/s/{token}' if token else None,
-            'token': token,
-            'thumb': f'/admin/api/thumb/{quote(f.name)}',
-        })
-    return {'files': items}
-
-
-@app.get('/admin/api/thumb/{name:path}')
-def admin_thumb(request: Request, name: str) -> Response:
-    _require_admin(request)
-    path = _safe_incoming(name)
-    thumb = shares.thumbnail(path)
-    if not thumb:
-        raise HTTPException(status_code=404, detail='Kein Vorschaubild')
-    return _serve_file(thumb, request, 'image/jpeg', max_age=86400)
-
-
-@app.post('/admin/api/share')
-async def admin_share(request: Request) -> dict:
-    _require_admin(request)
-    body = await request.json()
-    path = _safe_incoming(body.get('file'))
-    for tok, entry in shares.read().items():
-        if entry['file'] == path.name:
-            return {'link': f'{PUBLIC_BASE}/s/{tok}', 'token': tok, 'reused': True}
-    days = body.get('days')
-    entry = shares.create(path.name, int(days) if days else None)
-    shares.thumbnail(path)
-    return {'link': f"{PUBLIC_BASE}/s/{entry['token']}", 'token': entry['token'], 'reused': False}
-
-
-@app.post('/admin/api/unshare')
-async def admin_unshare(request: Request) -> dict:
-    _require_admin(request)
-    body = await request.json()
-    return {'ok': shares.revoke(str(body.get('token', '')))}
-
-
-@app.post('/admin/api/delete')
-async def admin_delete(request: Request) -> dict:
-    _require_admin(request)
-    body = await request.json()
-    path = _safe_incoming(body.get('file'))
-    for tok, entry in shares.read().items():
-        if entry['file'] == path.name:
-            shares.revoke(tok)
-    for leftover in shares.THUMB_DIR.glob(f'{shares.cache_key(path)}*'):
-        leftover.unlink(missing_ok=True)
-    path.unlink()
-    return {'ok': True}
-
-
-@app.post('/admin/api/inbox')
-async def admin_inbox_open(request: Request) -> dict:
-    """Open the one-shot link meant for someone else to upload through."""
-    _require_admin(request)
-    body = await request.json()
-    files = max(1, min(20, int(body.get('files', 1))))
-    gigabytes = float(body.get('maxGb', 2))
-    state = store.open_session(files, int(gigabytes * 1024 ** 3), True, '')
-    return {'link': f"{LINK_BASE}/#{state['token']}", 'remaining': store.remaining(state)}
-
-
-@app.post('/admin/api/inbox/close')
-def admin_inbox_close(request: Request) -> dict:
-    _require_admin(request)
-    store.close_session()
-    return {'ok': True}
+    for key, value in replacements.items():
+        html = html.replace(key, value if key == '__META__' else _escape(value))
+    return HTMLResponse(html, headers={'Cache-Control': 'no-store'})

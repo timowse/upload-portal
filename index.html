@@ -1,445 +1,299 @@
 <!doctype html>
 <html lang="de">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <meta name="color-scheme" content="light dark" />
-  <meta name="theme-color" content="#f6f8fc" media="(prefers-color-scheme: light)" />
-  <meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)" />
-  <meta name="robots" content="noindex, nofollow" />
-  <title>Upload Portal</title>
-  <style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="color-scheme" content="light dark" />
+<meta name="theme-color" content="#f6f8fc" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#0b0d12" media="(prefers-color-scheme: dark)" />
+<meta name="robots" content="noindex, nofollow" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="Datei teilen" />
+<title>Datei teilen</title>
+<style>
+  :root{
+    --bg:#f6f8fc; --card:#fff; --line:rgba(15,23,42,.10); --soft:rgba(15,23,42,.04);
+    --text:#0f172a; --muted:#64748b; --accent:#3659e5; --ink:#fff;
+    --ok:#166534; --ok-bg:#dcfce7; --ok-line:#86efac; --err:#b91c1c;
+    --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
+    --safe-l:env(safe-area-inset-left,0px); --safe-r:env(safe-area-inset-right,0px);
+  }
+  @media (prefers-color-scheme:dark){
     :root{
-      --bg:#f6f8fc; --card:#ffffff; --line:rgba(15,23,42,.09); --soft:rgba(15,23,42,.04);
-      --text:#0f172a; --muted:#64748b; --accent:#3659e5; --accent-ink:#fff;
-      --ok:#166534; --ok-bg:#dcfce7; --ok-line:#86efac;
-      --off:#991b1b; --off-bg:#fee2e2;
-      --err:#b91c1c; --radius:18px;
-      --safe-t:env(safe-area-inset-top,0px); --safe-b:env(safe-area-inset-bottom,0px);
-      --safe-l:env(safe-area-inset-left,0px); --safe-r:env(safe-area-inset-right,0px);
+      --bg:#0b0d12; --card:#141822; --line:rgba(255,255,255,.10); --soft:rgba(255,255,255,.05);
+      --text:#eef2f9; --muted:#96a2b6; --accent:#6b8afd;
+      --ok:#4ade80; --ok-bg:rgba(34,197,94,.14); --ok-line:rgba(134,239,172,.42); --err:#fca5a5;
     }
-    @media (prefers-color-scheme:dark){
-      :root{
-        --bg:#0b0d12; --card:#12151c; --line:rgba(255,255,255,.10); --soft:rgba(255,255,255,.04);
-        --text:#e9eef7; --muted:#94a3b8; --accent:#6b8afd;
-        --ok:#86efac; --ok-bg:rgba(34,197,94,.14); --ok-line:rgba(134,239,172,.45);
-        --off:#fca5a5; --off-bg:rgba(239,68,68,.14);
-        --err:#fca5a5;
-      }
-    }
-    *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-    html,body{min-height:100%;margin:0}
-    body{
-      background:var(--bg); color:var(--text);
-      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-      -webkit-font-smoothing:antialiased; line-height:1.5;
-    }
-    .shell{
-      max-width:820px; margin:0 auto;
-      padding:calc(20px + var(--safe-t)) calc(16px + var(--safe-r)) calc(28px + var(--safe-b)) calc(16px + var(--safe-l));
-    }
-    .card{
-      background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
-      overflow:hidden; box-shadow:0 1px 2px rgba(15,23,42,.04), 0 12px 32px rgba(15,23,42,.06);
-    }
-    @media (prefers-color-scheme:dark){ .card{box-shadow:none} }
+  }
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{margin:0;min-height:100%}
+  body{
+    background:var(--bg);color:var(--text);line-height:1.5;
+    font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{
+    max-width:600px;margin:0 auto;
+    padding:calc(26px + var(--safe-t)) calc(16px + var(--safe-r)) calc(30px + var(--safe-b)) calc(16px + var(--safe-l));
+  }
+  header{text-align:center;margin-bottom:22px}
+  header h1{font-size:1.62rem;margin:0 0 6px;letter-spacing:-.025em}
+  header p{color:var(--muted);margin:0;font-size:.95rem}
+  .hidden{display:none !important}
 
-    .header{padding:22px 20px 4px}
-    .kicker{
-      display:inline-flex; align-items:center; gap:7px; font-size:.74rem; font-weight:700;
-      letter-spacing:.07em; text-transform:uppercase; color:var(--muted);
-      background:var(--soft); border:1px solid var(--line); border-radius:999px; padding:6px 12px;
-    }
-    .kicker .dot{width:7px;height:7px;border-radius:50%;background:#dc2626}
-    .kicker.active .dot{background:#16a34a; box-shadow:0 0 0 3px rgba(22,163,74,.18)}
-    h1{font-size:1.5rem; line-height:1.25; margin:14px 0 6px; letter-spacing:-.02em}
-    .lede{color:var(--muted); margin:0; font-size:.98rem}
+  .drop{
+    position:relative;border:1.5px dashed var(--line);border-radius:20px;
+    padding:34px 18px;text-align:center;background:var(--card);
+    transition:border-color .2s,background .2s;
+  }
+  .drop.over{border-color:var(--accent);background:var(--soft)}
+  .drop input{position:absolute;inset:0;opacity:0;cursor:pointer;font-size:16px}
+  .drop .plus{
+    width:60px;height:60px;border-radius:18px;margin:0 auto 14px;display:grid;place-items:center;
+    background:var(--accent);color:var(--ink);font-size:2rem;line-height:1;
+  }
+  .drop h2{margin:0 0 5px;font-size:1.1rem}
+  .drop p{margin:0;color:var(--muted);font-size:.9rem}
+  .facts{
+    display:flex;gap:8px;justify-content:center;flex-wrap:wrap;
+    margin-top:16px;color:var(--muted);font-size:.82rem;
+  }
+  .facts span{background:var(--soft);border:1px solid var(--line);border-radius:999px;padding:5px 11px}
 
-    .content{padding:18px 20px 22px}
-    .panel-top{
-      display:flex; gap:12px; align-items:flex-start; justify-content:space-between;
-      flex-wrap:wrap; padding-bottom:16px; border-bottom:1px solid var(--line); margin-bottom:18px;
-    }
-    .badge{
-      display:inline-flex; align-items:center; gap:7px; border-radius:999px;
-      padding:6px 13px; font-size:.84rem; font-weight:700;
-    }
-    .badge.on{background:var(--ok-bg); color:var(--ok)}
-    .badge.off{background:var(--off-bg); color:var(--off)}
-    .badge .mini{width:6px;height:6px;border-radius:50%;background:currentColor}
-    .summary{color:var(--muted); font-size:.92rem; max-width:44ch}
-    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.82rem}
-
-    .grid{display:grid; grid-template-columns:1.55fr 1fr; gap:16px}
-    .box h2{
-      font-size:.74rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
-      color:var(--muted); margin:0 0 10px;
-    }
-    .list{list-style:none; margin:0; padding:0; border:1px solid var(--line); border-radius:14px; overflow:hidden}
-    .list li{
-      display:flex; justify-content:space-between; gap:12px; align-items:center;
-      padding:11px 14px; font-size:.9rem; border-bottom:1px solid var(--line);
-    }
-    .list li:last-child{border-bottom:none}
-    .list li:nth-child(odd){background:var(--soft)}
-    .list .label{color:var(--muted)}
-    .list .value{font-weight:700; text-align:right}
-
-    .drop{
-      position:relative; border:1.5px dashed var(--line); border-radius:16px;
-      padding:26px 18px; text-align:center; background:var(--soft); transition:border-color .2s, background .2s;
-    }
-    .drop input{position:absolute; inset:0; opacity:0; cursor:pointer; font-size:16px}
-    .drop .icon{
-      width:52px;height:52px;border-radius:16px;margin:0 auto 12px;display:grid;place-items:center;
-      background:var(--card); border:1px solid var(--line); font-size:1.4rem; color:var(--muted);
-    }
-    .drop h3{margin:0 0 5px; font-size:1.02rem}
-    .drop p{margin:0; color:var(--muted); font-size:.89rem}
-    .open-mode .drop{border-color:var(--ok-line)}
-    .open-mode .drop .icon{background:var(--ok-bg); color:var(--ok); border-color:transparent}
-    .drop.done{border-style:solid; border-color:var(--ok-line)}
-    .drop.done .icon{background:var(--ok-bg); color:var(--ok); border-color:transparent}
-
-    .filename{
-      margin:14px 0 10px; font-size:.86rem; color:var(--muted); word-break:break-word;
-      font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-    }
-    .progress{height:6px; border-radius:99px; background:var(--line); overflow:hidden}
-    .bar{height:100%; width:0; border-radius:99px; background:var(--accent); transition:width .25s ease}
-    .actions{position:relative; z-index:2; margin-top:16px; display:grid; gap:10px; justify-items:center}
-    button{
-      appearance:none; border:none; border-radius:13px; background:var(--accent); color:var(--accent-ink);
-      font:inherit; font-weight:700; font-size:1rem; padding:14px 26px; cursor:pointer;
-      min-height:50px; width:100%; max-width:320px; transition:transform .12s, opacity .2s;
-    }
-    button:active:not(:disabled){transform:scale(.98)}
-    button:disabled{opacity:.42; cursor:default}
-    .hint{color:var(--muted); font-size:.86rem}
-    .statusline{margin-top:10px; color:var(--muted); font-size:.9rem; min-height:1.3em}
-    .statusline.err{color:var(--err); font-weight:600}
-    .hidden{display:none !important}
-
-    .footer{
-      display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;
-      padding:14px 20px; border-top:1px solid var(--line); color:var(--muted); font-size:.8rem;
-      background:var(--soft);
-    }
-
-    @media (max-width:720px){
-      .shell{padding-left:calc(12px + var(--safe-l)); padding-right:calc(12px + var(--safe-r))}
-      .grid{grid-template-columns:1fr}
-      .header{padding:20px 16px 4px}
-      .content{padding:16px 16px 20px}
-      .footer{padding:13px 16px}
-      h1{font-size:1.32rem}
-      .panel-top{flex-direction:column; gap:10px}
-      button{max-width:none}
-      .drop{padding:30px 16px}
-    }
-  </style>
+  .item{
+    background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:14px;margin-top:12px;
+  }
+  .item.ready{border-color:var(--ok-line)}
+  .top{display:flex;gap:10px;align-items:center}
+  .top .nm{flex:1;min-width:0;font-weight:650;font-size:.94rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .top .sz{color:var(--muted);font-size:.82rem;flex:0 0 auto}
+  .st{color:var(--muted);font-size:.84rem;margin-top:4px}
+  .st.good{color:var(--ok);font-weight:650}
+  .st.bad{color:var(--err);font-weight:600}
+  .track{height:6px;border-radius:99px;background:var(--line);overflow:hidden;margin-top:9px}
+  .fill{height:100%;width:0;background:var(--accent);border-radius:99px;transition:width .2s}
+  .linkbox{
+    display:flex;gap:8px;align-items:center;margin-top:11px;padding:10px 12px;
+    background:var(--soft);border:1px solid var(--line);border-radius:12px;
+  }
+  .linkbox code{
+    flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+    font-size:.8rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
+  .acts{display:flex;gap:8px;margin-top:10px}
+  .btn{
+    appearance:none;border:1px solid var(--line);background:var(--soft);color:var(--text);
+    border-radius:12px;padding:12px 16px;font:inherit;font-size:.93rem;font-weight:650;
+    cursor:pointer;min-height:46px;flex:1;display:inline-flex;align-items:center;
+    justify-content:center;gap:7px;text-decoration:none;
+  }
+  .btn:active{transform:scale(.98)}
+  .btn.primary{background:var(--accent);border-color:transparent;color:var(--ink)}
+  .notice{
+    margin-top:18px;padding:13px 15px;border-radius:14px;background:var(--soft);
+    border:1px solid var(--line);color:var(--muted);font-size:.86rem;text-align:center;
+  }
+  .notice.bad{color:var(--err);border-color:var(--err)}
+  .toast{
+    position:fixed;left:50%;bottom:calc(24px + var(--safe-b));transform:translateX(-50%);
+    background:var(--card);border:1px solid var(--line);border-radius:999px;padding:11px 20px;
+    font-size:.88rem;z-index:60;opacity:0;transition:opacity .25s;pointer-events:none;
+    box-shadow:0 8px 28px rgba(15,23,42,.14);
+  }
+  .toast.show{opacity:1}
+</style>
 </head>
 <body>
-  <main class="shell">
-    <section class="card">
-      <div class="header">
-        <div id="kicker" class="kicker closed"><span class="dot"></span><span id="kicker-text">Wird geprüft</span></div>
-        <h1 id="title">Upload Portal</h1>
-        <p id="lede" class="lede">Zustand wird geprüft…</p>
-      </div>
+<div class="wrap">
+  <header>
+    <h1>Datei teilen</h1>
+    <p>Hochladen, Link bekommen, weiterschicken.</p>
+  </header>
 
-      <div class="content">
-        <div class="panel-top">
-          <div>
-            <div id="badge" class="badge off"><span class="mini"></span><span id="badge-text">geschlossen</span></div>
-            <div id="summary" class="summary" style="margin-top:10px">Zustand wird beim Server abgefragt…</div>
-          </div>
-        </div>
+  <div class="drop" id="drop">
+    <input type="file" id="pick" multiple />
+    <div class="plus">+</div>
+    <h2>Datei auswählen</h2>
+    <p>Tippen oder hierher ziehen</p>
+    <div class="facts" id="facts"></div>
+  </div>
 
-        <div class="grid">
-          <div class="box">
-            <h2>Upload</h2>
+  <div id="list"></div>
+  <div class="notice hidden" id="notice"></div>
+</div>
+<div class="toast" id="toast"></div>
 
-            <form id="form" class="drop hidden">
-              <input id="file" type="file" />
-              <div class="icon">↑</div>
-              <h3 id="drop-title">Datei auswählen oder hier ablegen</h3>
-              <p id="drop-copy">Kein Login, kein Zwangs-Refresh — nur ein sauberer Upload-Link.</p>
-              <div class="filename" id="fname">Noch keine Datei ausgewählt</div>
-              <div class="progress"><div id="bar" class="bar"></div></div>
-              <div class="actions">
-                <button id="submit" type="submit" disabled>Hochladen</button>
-                <div class="hint" id="hint">Wähle eine Datei aus.</div>
-              </div>
-              <div class="statusline" id="statusline"></div>
-            </form>
+<script>
+const $ = (id) => document.getElementById(id);
+let BASE = '';
+let CFG = { chunkSize: 32 * 1024 * 1024, maxBytes: 2 * 1024 ** 3, days: 30, accepting: true };
 
-            <div id="closed-state" class="drop">
-              <div class="icon">⦸</div>
-              <h3 id="closed-title">Gerade nicht aktiv</h3>
-              <p id="closed-copy">Dieser Link ist zurzeit nicht freigeschaltet.</p>
-            </div>
+const fmt = (n) => {
+  const u = ['B','KB','MB','GB','TB']; let v = Number(n)||0, i = 0;
+  while (v >= 1024 && i < u.length-1) { v /= 1024; i++; }
+  return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + ' ' + u[i];
+};
 
-            <div id="done-state" class="drop done hidden">
-              <div class="icon">✓</div>
-              <h3 id="done-title">Upload abgeschlossen</h3>
-              <p id="done-copy">Danke, die Datei ist angekommen.</p>
-            </div>
-          </div>
+function toast(text) {
+  const t = $('toast'); t.textContent = text; t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 1800);
+}
 
-          <div class="box">
-            <h2>Optionen</h2>
-            <ul class="list" id="options"></ul>
-          </div>
-        </div>
-      </div>
+async function api(path, options) {
+  const r = await fetch(BASE + path, options);
+  if (!r.ok) {
+    let detail = `HTTP ${r.status}`;
+    try { detail = (await r.json()).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return r.json();
+}
+const post = (path, body) => api(path, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: body === undefined ? undefined : JSON.stringify(body),
+});
 
-      <div class="footer">
-        <div>Dateien gehen direkt auf den Pi, ohne Zwischenstation.</div>
-        <div class="mono" id="footer-note">—</div>
-      </div>
-    </section>
-  </main>
-
-  <script>
-    // The link that gets handed out carries the session token in its
-    // fragment: https://upload.t1mo.dev/#<token>. A fragment is never sent
-    // to a server, so GitHub Pages never sees it - only the Pi does, and
-    // only because we put it in the query string of our own API calls.
-    const TOKEN = decodeURIComponent(location.hash.replace(/^#/, '')).trim();
-
-    const els = {};
-    for (const id of ['kicker', 'kicker-text', 'title', 'lede', 'badge', 'badge-text',
-                      'summary', 'options', 'form', 'file', 'fname',
-                      'submit', 'hint', 'bar', 'statusline', 'closed-state', 'closed-title',
-                      'closed-copy', 'done-state', 'done-copy', 'drop-title', 'drop-copy',
-                      'footer-note']) {
-      els[id] = document.getElementById(id);
-    }
-
-    let cfg = {};
-    let status = { active: false };
-    let busy = false;
-
-    const fmt = (n) => {
-      const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-      let v = Number(n) || 0, i = 0;
-      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-      return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + ' ' + units[i];
+// Only XHR reports how much of a request body has left the device, which is
+// the difference between a progress bar and a spinner.
+function putChunk(url, blob, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('PUT', BASE + url);
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) return resolve();
+      let d = `HTTP ${xhr.status}`;
+      try { d = JSON.parse(xhr.responseText).detail || d; } catch (_) {}
+      reject(new Error(d));
     };
+    xhr.onerror = () => reject(new Error('Verbindung unterbrochen'));
+    xhr.send(blob);
+  });
+}
 
-    function setMode(mode) {
-      const active = mode === 'open';
-      els.kicker.className = 'kicker ' + (active ? 'active' : 'closed');
-      els['kicker-text'].textContent = active ? 'Freigabe aktiv' : 'Geschlossen';
-      els.badge.className = 'badge ' + (active ? 'on' : 'off');
-      els['badge-text'].textContent = active ? 'aktiv' : 'geschlossen';
-      document.body.classList.toggle('open-mode', active);
-      els.form.classList.toggle('hidden', mode !== 'open');
-      els['closed-state'].classList.toggle('hidden', mode !== 'closed');
-      els['done-state'].classList.toggle('hidden', mode !== 'done');
+async function hand(url, title) {
+  if (navigator.share) {
+    try { await navigator.share({ title, url }); return; }
+    catch (e) { if (e.name === 'AbortError') return; }
+  }
+  try { await navigator.clipboard.writeText(url); toast('Link kopiert'); }
+  catch (_) { prompt('Link', url); }
+}
+
+function card(file) {
+  const el = document.createElement('div');
+  el.className = 'item';
+  el.innerHTML = `<div class="top"><div class="nm"></div><div class="sz">${fmt(file.size)}</div></div>
+    <div class="st">wird vorbereitet…</div>
+    <div class="track"><div class="fill"></div></div>`;
+  el.querySelector('.nm').textContent = file.name;
+  $('list').appendChild(el);
+  return {
+    el,
+    st: el.querySelector('.st'),
+    fill: el.querySelector('.fill'),
+    track: el.querySelector('.track'),
+  };
+}
+
+async function uploadOne(file, ui) {
+  const init = await post('/api/upload/init', { name: file.name, size: file.size });
+  const chunks = Math.max(1, Math.ceil(file.size / init.chunkSize));
+  let sent = 0;
+  for (let i = 0; i < chunks; i++) {
+    const blob = file.slice(i * init.chunkSize, Math.min((i+1) * init.chunkSize, file.size));
+    const base = sent;
+    ui.st.textContent = chunks > 1 ? `Teil ${i+1} von ${chunks}…` : 'wird hochgeladen…';
+    await putChunk(`/api/upload/part?id=${encodeURIComponent(init.uploadId)}&i=${i}`, blob,
+      (loaded) => { ui.fill.style.width = ((base + loaded) / file.size) * 100 + '%'; });
+    sent += blob.size;
+  }
+  return post(`/api/upload/done?id=${encodeURIComponent(init.uploadId)}`);
+}
+
+function finish(ui, result) {
+  ui.el.classList.add('ready');
+  ui.track.remove();
+  ui.st.className = 'st good';
+  ui.st.textContent = `Fertig · Link gilt ${result.days} Tage`;
+  const box = document.createElement('div');
+  box.className = 'linkbox';
+  box.innerHTML = '<code></code>';
+  box.querySelector('code').textContent = result.link;
+  const acts = document.createElement('div');
+  acts.className = 'acts';
+  acts.innerHTML = `<button class="btn primary" data-a="share">Teilen</button>
+                    <button class="btn" data-a="copy">Kopieren</button>
+                    <a class="btn" href="${result.link}" target="_blank" rel="noopener">Ansehen</a>`;
+  acts.querySelector('[data-a=share]').addEventListener('click', () => hand(result.link, result.name));
+  acts.querySelector('[data-a=copy]').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(result.link); toast('Link kopiert'); }
+    catch (_) { prompt('Link', result.link); }
+  });
+  ui.el.append(box, acts);
+}
+
+async function run(files) {
+  for (const file of Array.from(files)) {
+    const ui = card(file);
+    if (file.size > CFG.maxBytes) {
+      ui.track.remove();
+      ui.st.className = 'st bad';
+      ui.st.textContent = `Zu groß — maximal ${fmt(CFG.maxBytes)} pro Datei.`;
+      continue;
     }
-
-    function renderOptions() {
-      const rows = status.active
-        ? [['Verbleibend', `${status.remaining} von ${status.maxFiles}`],
-           ['Max. Größe', fmt(status.maxBytes)],
-           ['Auto-Close', status.autoClose ? 'ja' : 'nein'],
-           ['Stückgröße', fmt(status.chunkSize)]]
-        : [['Status', 'geschlossen'], ['Backend', cfg.backendUrl ? 'erreichbar' : 'nicht gesetzt']];
-      els.options.innerHTML = rows
-        .map(([k, v]) => `<li><span class="label">${k}</span><span class="value">${v}</span></li>`)
-        .join('');
+    try {
+      finish(ui, await uploadOne(file, ui));
+    } catch (err) {
+      ui.track.remove();
+      ui.st.className = 'st bad';
+      ui.st.textContent = err.message;
     }
+  }
+}
 
-    function render() {
-      els.title.textContent = cfg.title || 'Upload Portal';
-      els.lede.textContent = cfg.lede || 'Upload auf Abruf.';
+$('pick').addEventListener('change', (e) => { run(e.target.files); e.target.value = ''; });
+const drop = $('drop');
+['dragenter','dragover'].forEach(ev => drop.addEventListener(ev, (e) => {
+  e.preventDefault(); drop.classList.add('over');
+}));
+['dragleave','drop'].forEach(ev => drop.addEventListener(ev, (e) => {
+  e.preventDefault(); drop.classList.remove('over');
+}));
+drop.addEventListener('drop', (e) => { if (e.dataTransfer?.files) run(e.dataTransfer.files); });
 
-      if (status.active) {
-        setMode('open');
-        const multi = status.remaining > 1;
-        els.file.multiple = multi;
-        els['drop-title'].textContent = multi ? 'Dateien auswählen oder hier ablegen'
-                                              : 'Datei auswählen oder hier ablegen';
-        els['drop-copy'].textContent = multi
-          ? `Noch ${status.remaining} Uploads frei, maximal ${fmt(status.maxBytes)} pro Datei.`
-          : `Ein Upload frei, maximal ${fmt(status.maxBytes)}.`;
-        els.summary.textContent = status.note
-          || 'Upload ist freigeschaltet. Nach dem letzten Upload schließt sich der Link von selbst.';
-        els.hint.textContent = status.autoClose
-          ? 'Der Link schließt sich nach dem letzten Upload.'
-          : 'Der Link bleibt nach dem Upload offen.';
-        els['footer-note'].textContent = `${status.remaining} frei`;
-      } else {
-        setMode('closed');
-        els.summary.textContent = TOKEN
-          ? 'Dieser Link ist abgelaufen oder wurde bereits benutzt.'
-          : 'Ohne gültigen Freigabe-Link ist hier nichts zu tun.';
-        els['closed-copy'].textContent = TOKEN
-          ? 'Der Link war einmalig gültig. Frag nach einem neuen, wenn du noch etwas schicken möchtest.'
-          : 'Dieser Link wird erst aktiv, wenn eine Freigabe geöffnet wurde.';
-        els['footer-note'].textContent = 'geschlossen';
-      }
-      renderOptions();
-    }
+async function boot() {
+  // On GitHub Pages config.json names the Pi. Served from the Pi itself the
+  // file is absent, and the API is simply same-origin.
+  try {
+    const r = await fetch('config.json?ts=' + Date.now(), { cache: 'no-store' });
+    const cfg = await r.json();
+    if (cfg.backendUrl) BASE = String(cfg.backendUrl).replace(/\/$/, '');
+  } catch (_) { BASE = ''; }
 
-    function say(text, isError) {
-      els.statusline.textContent = text || '';
-      els.statusline.classList.toggle('err', Boolean(isError));
-    }
+  try {
+    CFG = await api('/api/config');
+  } catch (_) {
+    $('notice').className = 'notice bad';
+    $('notice').textContent = 'Der Server ist gerade nicht erreichbar.';
+    $('pick').disabled = true;
+    return;
+  }
 
-    function progress(fraction) {
-      els.bar.style.width = Math.max(0, Math.min(1, fraction)) * 100 + '%';
-    }
+  $('facts').innerHTML =
+    `<span>bis ${fmt(CFG.maxBytes)} pro Datei</span>` +
+    `<span>Link gilt ${CFG.days} Tage</span>` +
+    `<span>mehrere gleichzeitig</span>`;
 
-    async function api(path, options) {
-      const r = await fetch(cfg.backendUrl.replace(/\/$/, '') + path, options);
-      if (!r.ok) {
-        let detail = `HTTP ${r.status}`;
-        try { detail = (await r.json()).detail || detail; } catch (_) {}
-        throw new Error(detail);
-      }
-      return r.json();
-    }
-
-    // Each chunk goes up with XHR rather than fetch, because only XHR
-    // reports how much of the request body has left the device.
-    function putChunk(url, blob, onProgress) {
-      return new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('PUT', url);
-        xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-        xhr.upload.onprogress = (e) => { if (e.lengthComputable) onProgress(e.loaded); };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) return resolve();
-          let detail = `HTTP ${xhr.status}`;
-          try { detail = JSON.parse(xhr.responseText).detail || detail; } catch (_) {}
-          reject(new Error(detail));
-        };
-        xhr.onerror = () => reject(new Error('Verbindung unterbrochen'));
-        xhr.send(blob);
-      });
-    }
-
-    async function uploadOne(file, index, total) {
-      const label = total > 1 ? `Datei ${index + 1} von ${total}: ` : '';
-      const init = await api(`/api/upload/init?t=${encodeURIComponent(TOKEN)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: file.name, size: file.size })
-      });
-
-      const chunkSize = init.chunkSize;
-      const chunks = Math.max(1, Math.ceil(file.size / chunkSize));
-      let sent = 0;
-
-      for (let i = 0; i < chunks; i++) {
-        const blob = file.slice(i * chunkSize, Math.min((i + 1) * chunkSize, file.size));
-        const base = sent;
-        say(`${label}Teil ${i + 1} von ${chunks} wird gesendet…`);
-        await putChunk(
-          `${cfg.backendUrl.replace(/\/$/, '')}/api/upload/part?t=${encodeURIComponent(TOKEN)}` +
-          `&id=${encodeURIComponent(init.uploadId)}&i=${i}`,
-          blob,
-          (loaded) => progress((base + loaded) / file.size)
-        );
-        sent += blob.size;
-        progress(sent / file.size);
-      }
-
-      return api(`/api/upload/done?t=${encodeURIComponent(TOKEN)}&id=${encodeURIComponent(init.uploadId)}`,
-                 { method: 'POST' });
-    }
-
-    async function runUpload(files) {
-      busy = true;
-      els.submit.disabled = true;
-      els.file.disabled = true;
-      let last = null;
-      try {
-        for (let i = 0; i < files.length; i++) {
-          progress(0);
-          last = await uploadOne(files[i], i, files.length);
-          // Keep the panel honest between files of a multi-file upload.
-          status.remaining = last.remaining;
-          status.active = !last.closed;
-          renderOptions();
-          els['footer-note'].textContent = last.closed ? 'geschlossen' : `${last.remaining} frei`;
-        }
-        progress(1);
-        const left = last ? last.remaining : 0;
-        els['done-copy'].textContent = last && last.closed
-          ? 'Danke, alles angekommen. Der Link ist jetzt geschlossen.'
-          : `Danke, angekommen. Es ${left === 1 ? 'ist noch ein Upload' : `sind noch ${left} Uploads`} frei.`;
-        setMode('done');
-        say('');
-      } catch (err) {
-        progress(0);
-        say(err.message || 'Upload fehlgeschlagen', true);
-        els.file.disabled = false;
-        els.submit.disabled = false;
-        await refresh();
-      } finally {
-        busy = false;
-      }
-    }
-
-    function updateSelection() {
-      const files = els.file.files ? Array.from(els.file.files) : [];
-      if (!files.length) {
-        els.fname.textContent = 'Noch keine Datei ausgewählt';
-        els.submit.disabled = true;
-        return;
-      }
-      if (files.length > status.remaining) {
-        els.fname.textContent = `${files.length} Dateien gewählt, aber nur ${status.remaining} frei`;
-        els.submit.disabled = true;
-        say(`Bitte höchstens ${status.remaining} Dateien auswählen.`, true);
-        return;
-      }
-      const tooBig = files.find((f) => f.size > status.maxBytes);
-      if (tooBig) {
-        els.fname.textContent = `${tooBig.name} ist zu groß (${fmt(tooBig.size)})`;
-        els.submit.disabled = true;
-        say(`Maximal ${fmt(status.maxBytes)} pro Datei.`, true);
-        return;
-      }
-      els.fname.textContent = files.map((f) => `${f.name} · ${fmt(f.size)}`).join(' | ');
-      els.submit.disabled = false;
-      say('');
-    }
-
-    els.file.addEventListener('change', updateSelection);
-    els.form.addEventListener('submit', (e) => {
-      e.preventDefault();
-      if (busy) return;
-      const files = els.file.files ? Array.from(els.file.files) : [];
-      if (files.length) runUpload(files);
-    });
-
-    async function refresh() {
-      if (!cfg.backendUrl) { status = { active: false }; render(); return; }
-      try {
-        status = await api(`/api/status?t=${encodeURIComponent(TOKEN)}`, { cache: 'no-store' });
-      } catch (err) {
-        status = { active: false };
-        say('Server nicht erreichbar.', true);
-      }
-      render();
-    }
-
-    async function boot() {
-      try {
-        const r = await fetch('config.json?ts=' + Date.now(), { cache: 'no-store' });
-        cfg = await r.json();
-      } catch (_) {
-        cfg = {};
-      }
-      await refresh();
-    }
-
-    boot();
-  </script>
+  if (!CFG.accepting) {
+    $('notice').className = 'notice bad';
+    $('notice').textContent = 'Zurzeit ist kein Speicherplatz frei. Bitte später nochmal.';
+    $('pick').disabled = true;
+  }
+}
+boot();
+</script>
 </body>
 </html>

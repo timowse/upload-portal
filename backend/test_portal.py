@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""Checks for the upload and share paths.
+"""Checks for the drop.
 
-Run inside the container:
     docker compose exec upload-portal python test_portal.py
 """
 from __future__ import annotations
@@ -11,27 +10,27 @@ import os
 import shutil
 import sys
 import tempfile
+import time
+from urllib.parse import quote
 
 DATA = tempfile.mkdtemp(prefix='portal-test-')
 os.environ['PORTAL_DATA'] = DATA
 os.environ['PORTAL_ORIGIN'] = 'https://upload.t1mo.dev'
 os.environ['PORTAL_PUBLIC_BASE'] = 'https://up.t1mo.dev'
-os.environ['PORTAL_ADMIN_PASSWORD'] = 'test-passwort-1234'
+os.environ['PORTAL_MAX_GB'] = '0.01'          # 10 MB, so the ceiling is testable
+os.environ['PORTAL_UPLOADS_PER_HOUR'] = '500'
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import auth  # noqa: E402
-import shares  # noqa: E402
-import store  # noqa: E402
+import db  # noqa: E402
+import media  # noqa: E402
 
-importlib.reload(store)
-importlib.reload(shares)
-importlib.reload(auth)
+importlib.reload(db)
+importlib.reload(media)
 import app as appmod  # noqa: E402
 
 importlib.reload(appmod)
 from fastapi.testclient import TestClient  # noqa: E402
 
-c = TestClient(appmod.app)
 passed = failed = 0
 
 
@@ -49,128 +48,104 @@ def section(title: str) -> None:
     print(f'\n{title}')
 
 
-section('Freigabe und Token')
-check('geschlossen ohne Token', c.get('/api/status').json() == {'active': False})
-check('kein Upload ohne Freigabe',
-      c.post('/api/upload/init', json={'name': 'x', 'size': 5}).status_code == 403)
-st = store.open_session(max_files=2, max_bytes=5 * 1024 * 1024, auto_close=True, note='Test')
-tok = st['token']
-check('falscher Token sieht nichts', c.get('/api/status', params={'t': 'nope'}).json() == {'active': False})
-check('richtiger Token sieht die Freigabe',
-      c.get('/api/status', params={'t': tok}).json().get('remaining') == 2)
+def upload(c, name: str, payload: bytes, piece: int = 300_000):
+    init = c.post('/api/upload/init', json={'name': name, 'size': len(payload)})
+    if init.status_code != 200:
+        return init
+    uid = init.json()['uploadId']
+    for i, off in enumerate(range(0, len(payload), piece)):
+        c.put('/api/upload/part', params={'id': uid, 'i': i}, content=payload[off:off + piece])
+    return c.post('/api/upload/done', params={'id': uid})
 
-section('Upload in Stuecken')
-payload = bytes(range(256)) * 4000
-init = c.post('/api/upload/init', params={'t': tok},
-              json={'name': '../../böse Datei.HEIC', 'size': len(payload)}).json()
-check('Dateiname entschaerft', '/' not in init['name'] and '..' not in init['name'], init['name'])
-for i, off in enumerate(range(0, len(payload), 300_000)):
-    r = c.put('/api/upload/part', params={'t': tok, 'id': init['uploadId'], 'i': i},
-              content=payload[off:off + 300_000])
-    check(f'Chunk {i}', r.status_code == 200, r.text)
-check('Chunk ausser der Reihe abgelehnt',
-      c.put('/api/upload/part', params={'t': tok, 'id': init['uploadId'], 'i': 99},
-            content=b'x').status_code == 409)
-done = c.post('/api/upload/done', params={'t': tok, 'id': init['uploadId']}).json()
-check('Abschluss zaehlt runter', done['ok'] and done['remaining'] == 1, done)
-landed = list(store.INCOMING_DIR.iterdir())
-check('Datei byte-genau auf Platte', len(landed) == 1 and landed[0].read_bytes() == payload)
 
-section('Grenzen werden serverseitig durchgesetzt')
-check('zu grosse Ankuendigung -> 413',
-      c.post('/api/upload/init', params={'t': tok},
-             json={'name': 'gross.bin', 'size': 99 * 1024 * 1024}).status_code == 413)
-lie = c.post('/api/upload/init', params={'t': tok}, json={'name': 'lug.bin', 'size': 10}).json()
-check('mehr Daten als angekuendigt -> 413',
-      c.put('/api/upload/part', params={'t': tok, 'id': lie['uploadId'], 'i': 0},
-            content=b'x' * 500).status_code == 413)
-check('Pfad-Traversal in der ID -> 400',
-      c.post('/api/upload/done', params={'t': tok, 'id': '../../etc'}).status_code == 400)
+with TestClient(appmod.app) as c:
+    section('Jeder darf hochladen, ohne Anmeldung')
+    check('Einstellungen abrufbar', c.get('/api/config').json()['days'] == db.DEFAULT_DAYS)
+    check('Upload-Seite wird ausgeliefert', '<title>Datei teilen</title>' in c.get('/').text)
+    payload = bytes(range(256)) * 4000
+    done = upload(c, '../../böse Datei.HEIC', payload)
+    check('Upload nimmt an', done.status_code == 200, done.text)
+    result = done.json()
+    check('Dateiname entschaerft', '/' not in result['name'] and '..' not in result['name'],
+          result['name'])
+    check('Link kommt sofort zurueck', result['link'].startswith('https://up.t1mo.dev/s/'), result)
+    check('Ablauf wird genannt', result['days'] == db.DEFAULT_DAYS, result)
+    token = result['link'].rsplit('/', 1)[-1]
 
-section('Auto-Close')
-second = c.post('/api/upload/init', params={'t': tok}, json={'name': 'zwei.txt', 'size': 4}).json()
-c.put('/api/upload/part', params={'t': tok, 'id': second['uploadId'], 'i': 0}, content=b'abcd')
-last = c.post('/api/upload/done', params={'t': tok, 'id': second['uploadId']}).json()
-check('Session schliesst sich selbst', last['closed'] and last['remaining'] == 0, last)
-check('Token danach wertlos', c.get('/api/status', params={'t': tok}).json() == {'active': False})
+    section('Die Bytes stimmen')
+    got = c.get(f'/s/{token}/file')
+    check('Datei byte-genau zurueck', got.content == payload)
+    check('Groesse stimmt', len(got.content) == len(payload))
 
-section('CORS')
-allow = c.options('/api/status', headers={'Origin': 'https://upload.t1mo.dev',
-                                          'Access-Control-Request-Method': 'GET'}).headers
-check('Pages-Origin erlaubt', allow.get('access-control-allow-origin') == 'https://upload.t1mo.dev')
-deny = c.options('/api/status', headers={'Origin': 'https://evil.example',
-                                         'Access-Control-Request-Method': 'GET'}).headers
-check('fremdes Origin abgelehnt', 'access-control-allow-origin' not in deny)
+    section('Grenzen')
+    check('zu grosse Ankuendigung -> 413',
+          c.post('/api/upload/init', json={'name': 'gross.bin', 'size': 50 * 1024 * 1024}
+                 ).status_code == 413)
+    lie = c.post('/api/upload/init', json={'name': 'lug.bin', 'size': 10}).json()
+    check('mehr Daten als angekuendigt -> 413',
+          c.put('/api/upload/part', params={'id': lie['uploadId'], 'i': 0},
+                content=b'x' * 500).status_code == 413)
+    check('leere Datei abgelehnt',
+          c.post('/api/upload/init', json={'name': 'leer', 'size': 0}).status_code == 400)
+    check('Pfad-Traversal in der Upload-ID -> 400',
+          c.post('/api/upload/done', params={'id': '../../etc'}).status_code == 400)
+    ooo = c.post('/api/upload/init', json={'name': 'a.bin', 'size': 100}).json()
+    check('Teil ausser der Reihe -> 409',
+          c.put('/api/upload/part', params={'id': ooo['uploadId'], 'i': 5},
+                content=b'x').status_code == 409)
 
-section('Teilen-Links')
-name = landed[0].name
-entry = shares.create(name)
-share = entry['token']
-check('unbekannter Token -> 404', c.get('/s/gibtsnicht123').status_code == 404)
-meta = c.get(f'/s/{share}/meta').json()
-check('Anzeigename ohne Zeitstempel', not meta['name'].startswith('2'), meta['name'])
-check('gespeicherter Name bleibt erhalten', meta['stored'] == name)
-page = c.get(f'/s/{share}')
-check('Seite liefert HTML', page.status_code == 200 and '<title>' in page.text)
-check('Open-Graph-Titel gesetzt', f'og:title" content="{meta["name"]}"' in page.text)
-check('Download traegt den sauberen Namen',
-      meta['name'] in c.get(f'/s/{share}/dl').headers.get('content-disposition', ''))
+    section('Der Link')
+    meta = c.get(f'/s/{token}/meta').json()
+    check('Metadaten stimmen', meta['size'] == len(payload) and meta['kind'] == 'image', meta)
+    check('Resttage werden gezaehlt', 0 < meta['daysLeft'] <= db.DEFAULT_DAYS, meta)
+    page = c.get(f'/s/{token}')
+    check('Vorschauseite liefert HTML', page.status_code == 200 and '<title>' in page.text)
+    check('Open-Graph-Titel gesetzt', f'og:title" content="{meta["name"]}"' in page.text)
+    disp = c.get(f'/s/{token}/dl').headers.get('content-disposition', '')
+    # RFC 6266: an ASCII fallback plus the real name percent-encoded.
+    check('Download traegt den Namen',
+          f"filename*=UTF-8''{quote(meta['name'])}" in disp and disp.startswith('attachment'),
+          disp)
+    check('unbekannter Link -> 404', c.get('/s/gibtsnicht123').status_code == 404)
 
-section('Byte-Bereiche, ohne die kein Video laeuft')
-full = c.get(f'/s/{share}/file')
-check('volle Datei mit Accept-Ranges', full.headers.get('accept-ranges') == 'bytes')
-part = c.get(f'/s/{share}/file', headers={'Range': 'bytes=0-99'})
-check('206 mit Content-Range', part.status_code == 206 and
-      part.headers.get('content-range') == f'bytes 0-99/{len(payload)}', part.headers)
-check('Bereich stimmt byte-genau', part.content == payload[:100])
-suffix = c.get(f'/s/{share}/file', headers={'Range': 'bytes=-64'})
-check('Suffix-Bereich', suffix.status_code == 206 and suffix.content == payload[-64:])
-check('Bereich hinter dem Ende -> 416',
-      c.get(f'/s/{share}/file', headers={'Range': 'bytes=99999999-'}).status_code == 416)
+    section('Byte-Bereiche, ohne die kein Video laeuft')
+    check('Accept-Ranges gesetzt', got.headers.get('accept-ranges') == 'bytes')
+    part = c.get(f'/s/{token}/file', headers={'Range': 'bytes=0-99'})
+    check('206 mit Content-Range',
+          part.status_code == 206 and
+          part.headers.get('content-range') == f'bytes 0-99/{len(payload)}', part.headers)
+    check('Bereich byte-genau', part.content == payload[:100])
+    suffix = c.get(f'/s/{token}/file', headers={'Range': 'bytes=-64'})
+    check('Suffix-Bereich', suffix.status_code == 206 and suffix.content == payload[-64:])
+    check('hinter dem Ende -> 416',
+          c.get(f'/s/{token}/file', headers={'Range': 'bytes=99999999-'}).status_code == 416)
 
-section('Zuruecknehmen')
-check('Link zurueckgezogen', shares.revoke(share))
-check('danach 404', c.get(f'/s/{share}').status_code == 404)
+    section('Ablauf')
+    entry = db.list_files()[0]
+    with db.locked():
+        data = db.load()
+        data['files'][entry['id']]['expires'] = int(time.time()) - 10
+        db.save(data)
+    check('abgelaufener Link antwortet nicht mehr', c.get(f'/s/{token}').status_code == 404)
+    gone = db.sweep()
+    check('Aufraeumen entfernt ihn', entry['id'] in gone, gone)
+    check('Datei ist von der Platte weg', not db.blob(entry['id']).exists())
+    check('Index ist leer', db.stats()['files'] == 0)
 
-section('Oberflaeche: Anmeldung')
-# Secure cookies are only kept over https, so this client speaks https.
-a = TestClient(appmod.app, base_url='https://testserver')
-check('ohne Anmeldung keine Dateiliste', a.get('/admin/api/files').status_code == 401)
-check('Zustand sagt nicht angemeldet', a.get('/admin/api/state').json()['authed'] is False)
-check('falsches Passwort abgelehnt',
-      a.post('/admin/api/login', json={'password': 'daneben'}).status_code == 401)
-check('richtiges Passwort angenommen',
-      a.post('/admin/api/login', json={'password': 'test-passwort-1234'}).status_code == 200)
-check('danach angemeldet', a.get('/admin/api/state').json()['authed'] is True)
-check('Seite wird ausgeliefert', '<title>Dateien</title>' in a.get('/admin').text)
+    section('Tempodrossel')
+    appmod.UPLOADS_PER_HOUR = 2
+    appmod._recent.clear()
+    codes = [c.post('/api/upload/init', json={'name': 'x.bin', 'size': 10}).status_code
+             for _ in range(4)]
+    check('bremst nach dem Limit', codes[:2] == [200, 200] and codes[-1] == 429, codes)
 
-section('Oberflaeche: hochladen ohne Einmal-Token')
-before = store.read()
-check('Freigabe ist zu', not before['active'])
-own = a.post('/api/upload/init', json={'name': 'eigenes.png', 'size': 9}).json()
-check('Upload ohne Token erlaubt, weil angemeldet', 'uploadId' in own, own)
-a.put('/api/upload/part', params={'id': own['uploadId'], 'i': 0}, content=b'123456789')
-fin = a.post('/api/upload/done', params={'id': own['uploadId']}).json()
-check('Upload abgeschlossen', fin['ok'], fin)
-check('verbraucht keinen fremden Upload-Platz', store.read()['uploaded'] == before['uploaded'])
-
-section('Oberflaeche: teilen und aufraeumen')
-listing = a.get('/admin/api/files').json()['files']
-mine = next(f for f in listing if f['name'] == 'eigenes.png')
-link = a.post('/admin/api/share', json={'file': mine['stored']}).json()
-check('Link erzeugt', link['link'].startswith('https://up.t1mo.dev/s/'), link)
-again = a.post('/admin/api/share', json={'file': mine['stored']}).json()
-check('zweimal teilen gibt denselben Link', again['token'] == link['token'])
-check('Link funktioniert', c.get(f"/s/{link['token']}").status_code == 200)
-check('Pfad-Traversal beim Teilen abgewehrt',
-      a.post('/admin/api/share', json={'file': '../../etc/passwd'}).status_code in (400, 404))
-check('Eingangslink laesst sich oeffnen',
-      a.post('/admin/api/inbox', json={'files': 2, 'maxGb': 1}).json()['link'].startswith('https://upload'))
-check('und wieder schliessen', a.post('/admin/api/inbox/close').json()['ok'])
-check('Datei geloescht', a.post('/admin/api/delete', json={'file': mine['stored']}).json()['ok'])
-check('Link danach tot', c.get(f"/s/{link['token']}").status_code == 404)
-check('Abmelden funktioniert', a.post('/admin/api/logout').status_code == 200)
-check('danach wieder gesperrt', a.get('/admin/api/files').status_code == 401)
+    section('CORS')
+    allow = c.options('/api/config', headers={'Origin': 'https://upload.t1mo.dev',
+                                              'Access-Control-Request-Method': 'GET'}).headers
+    check('Pages-Origin erlaubt', allow.get('access-control-allow-origin') == 'https://upload.t1mo.dev')
+    deny = c.options('/api/config', headers={'Origin': 'https://evil.example',
+                                             'Access-Control-Request-Method': 'GET'}).headers
+    check('fremdes Origin abgelehnt', 'access-control-allow-origin' not in deny)
 
 shutil.rmtree(DATA, ignore_errors=True)
 print(f'\n=== {passed} bestanden, {failed} fehlgeschlagen ===')

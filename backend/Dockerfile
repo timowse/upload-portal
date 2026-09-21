@@ -8,10 +8,13 @@ RUN apt-get update \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY store.py shares.py auth.py app.py portalctl.py test_portal.py viewer.html admin.html ./
+COPY backend/db.py backend/media.py backend/app.py backend/portalctl.py \
+     backend/test_portal.py backend/viewer.html ./
+# The same page GitHub Pages serves, so both hostnames work on their own.
+COPY index.html ./
 
 ENV PORTAL_DATA=/data
 EXPOSE 8000
