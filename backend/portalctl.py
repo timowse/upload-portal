@@ -17,7 +17,7 @@ import time
 import db
 import media
 
-PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://up.t1mo.dev').rstrip('/')
+PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://share.t1mo.dev').rstrip('/')
 
 
 def human(n: int) -> str:

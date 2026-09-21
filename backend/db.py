@@ -28,9 +28,17 @@ TMP_DIR = DATA_DIR / 'tmp'
 THUMB_DIR = DATA_DIR / 'thumbs'
 
 CHUNK_SIZE = 32 * 1024 * 1024                     # under Cloudflare's 100 MB body cap
+GB = 1024 ** 3
+
+# A file up to BASE_BYTES is kept DEFAULT_DAYS. Beyond that the size may be
+# raised a gigabyte at a time up to MAX_BYTES, and the time it is kept
+# shrinks to match.
+BASE_BYTES = int(float(os.environ.get('PORTAL_BASE_GB', '5')) * GB)
+MAX_BYTES = int(float(os.environ.get('PORTAL_MAX_GB', '10')) * GB)
+STEP_BYTES = GB
 DEFAULT_DAYS = int(os.environ.get('PORTAL_DAYS', '30'))
+MIN_DAYS = int(os.environ.get('PORTAL_MIN_DAYS', '7'))
 MAX_DAYS = 365
-MAX_BYTES = int(float(os.environ.get('PORTAL_MAX_GB', '2')) * 1024 ** 3)
 # Stop accepting uploads while less than this is free, so a full disk never
 # takes the rest of the Pi down with it.
 KEEP_FREE = int(float(os.environ.get('PORTAL_KEEP_FREE_GB', '5')) * 1024 ** 3)
@@ -88,6 +96,29 @@ def accepting(size: int) -> bool:
     return free_space() - size > KEEP_FREE
 
 
+def days_for(size: int) -> int:
+    """How long a file of this size is kept.
+
+    Size times days stays roughly constant, so one 10 GB file costs the
+    disk about what a 5 GB file kept twice as long costs. That is the whole
+    trade the uploader is being offered, and it is the reason the number is
+    shown before anything is sent.
+    """
+    if size <= BASE_BYTES:
+        return DEFAULT_DAYS
+    return max(MIN_DAYS, min(DEFAULT_DAYS, round(BASE_BYTES * DEFAULT_DAYS / size)))
+
+
+def scale() -> list[dict]:
+    """The steps the page offers, each with what it costs in days."""
+    steps = []
+    size = BASE_BYTES
+    while size <= MAX_BYTES:
+        steps.append({'bytes': size, 'days': days_for(size)})
+        size += STEP_BYTES
+    return steps
+
+
 def safe_name(name: str) -> str:
     """Only ever used for display and the download header, never as a path."""
     name = os.path.basename(str(name or '')).replace('\x00', '')
@@ -102,7 +133,9 @@ def add_file(name: str, size: int, days: int | None = None) -> dict:
     with locked():
         data = load()
         fid = token(12)
-        keep = DEFAULT_DAYS if days is None else max(1, min(int(days), MAX_DAYS))
+        # The size decides, not the caller: a small file keeps the full
+        # period even when it arrived through a raised ceiling.
+        keep = days_for(int(size)) if days is None else max(1, min(int(days), MAX_DAYS))
         share_token = token(9)
         data['files'][fid] = {
             'name': safe_name(name),

@@ -15,8 +15,9 @@ from urllib.parse import quote
 
 DATA = tempfile.mkdtemp(prefix='portal-test-')
 os.environ['PORTAL_DATA'] = DATA
-os.environ['PORTAL_ORIGIN'] = 'https://upload.t1mo.dev'
-os.environ['PORTAL_PUBLIC_BASE'] = 'https://up.t1mo.dev'
+os.environ['PORTAL_ORIGIN'] = 'https://share.t1mo.dev'
+os.environ['PORTAL_PUBLIC_BASE'] = 'https://share.t1mo.dev'
+os.environ['PORTAL_BASE_GB'] = '0.005'        # 5 MB
 os.environ['PORTAL_MAX_GB'] = '0.01'          # 10 MB, so the ceiling is testable
 os.environ['PORTAL_UPLOADS_PER_HOUR'] = '500'
 
@@ -68,8 +69,9 @@ with TestClient(appmod.app) as c:
     result = done.json()
     check('Dateiname entschaerft', '/' not in result['name'] and '..' not in result['name'],
           result['name'])
-    check('Link kommt sofort zurueck', result['link'].startswith('https://up.t1mo.dev/s/'), result)
-    check('Ablauf wird genannt', result['days'] == db.DEFAULT_DAYS, result)
+    check('Link kommt sofort zurueck', result['link'].startswith('https://share.t1mo.dev/s/'),
+          result)
+    check('Ablauf wird genannt', result['days'] == db.days_for(len(payload)), result)
     token = result['link'].rsplit('/', 1)[-1]
 
     section('Die Bytes stimmen')
@@ -139,10 +141,41 @@ with TestClient(appmod.app) as c:
              for _ in range(4)]
     check('bremst nach dem Limit', codes[:2] == [200, 200] and codes[-1] == 429, codes)
 
+    section('Staffel: groesser heisst kuerzer gespeichert')
+    saved = (db.BASE_BYTES, db.MAX_BYTES, db.DEFAULT_DAYS, db.MIN_DAYS)
+    db.BASE_BYTES, db.MAX_BYTES, db.DEFAULT_DAYS, db.MIN_DAYS = 5 * db.GB, 10 * db.GB, 30, 7
+    check('kleine Datei bekommt die volle Zeit', db.days_for(100 * 1024 ** 2) == 30)
+    check('genau 5 GB bekommt 30 Tage', db.days_for(5 * db.GB) == 30)
+    check('10 GB bekommt 15 Tage', db.days_for(10 * db.GB) == 15, db.days_for(10 * db.GB))
+    steps = db.scale()
+    check('sechs Stufen in 1-GB-Schritten', len(steps) == 6 and
+          [s['bytes'] // db.GB for s in steps] == [5, 6, 7, 8, 9, 10], steps)
+    check('Dauer faellt mit jeder Stufe',
+          all(a['days'] >= b['days'] for a, b in zip(steps, steps[1:])),
+          [s['days'] for s in steps])
+    check('nie unter dem Minimum', db.days_for(500 * db.GB) == 7)
+    db.BASE_BYTES, db.MAX_BYTES, db.DEFAULT_DAYS, db.MIN_DAYS = saved
+
+    section('Was die Seite dafuer braucht')
+    cfg = c.get('/api/config').json()
+    check('Staffel wird ausgeliefert', isinstance(cfg.get('scale'), list) and cfg['scale'])
+    check('Basis und Maximum genannt',
+          cfg['baseBytes'] == db.BASE_BYTES and cfg['maxBytes'] == db.MAX_BYTES)
+    check('Mindestdauer genannt', cfg['minDays'] == db.MIN_DAYS)
+    # Der erste Token ist im Ablauf-Abschnitt weggeraeumt worden, und die
+    # Drossel aus dem Abschnitt davor steht noch scharf.
+    appmod.UPLOADS_PER_HOUR = 500
+    appmod._recent.clear()
+    frisch = upload(c, 'frisch.txt', b'hallo').json()['link'].rsplit('/', 1)[-1]
+    meta_neu = c.get(f'/s/{frisch}/meta').json()
+    check('Restlaufzeit steht in den Metadaten',
+          meta_neu.get('daysLeft') == db.DEFAULT_DAYS and 'expires' in meta_neu, meta_neu)
+
     section('CORS')
-    allow = c.options('/api/config', headers={'Origin': 'https://upload.t1mo.dev',
+    allow = c.options('/api/config', headers={'Origin': 'https://share.t1mo.dev',
                                               'Access-Control-Request-Method': 'GET'}).headers
-    check('Pages-Origin erlaubt', allow.get('access-control-allow-origin') == 'https://upload.t1mo.dev')
+    check('eigenes Origin erlaubt',
+          allow.get('access-control-allow-origin') == 'https://share.t1mo.dev')
     deny = c.options('/api/config', headers={'Origin': 'https://evil.example',
                                              'Access-Control-Request-Method': 'GET'}).headers
     check('fremdes Origin abgelehnt', 'access-control-allow-origin' not in deny)

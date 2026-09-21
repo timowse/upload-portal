@@ -1,20 +1,17 @@
 # Upload Portal
 
 A public file drop on a Raspberry Pi. Upload something, get a link, send it
-on. Files delete themselves after 30 days.
+on. Files delete themselves again.
 
 ```
-upload.t1mo.dev   GitHub Pages ─┐
-                                 ├─► API on up.t1mo.dev ─► Cloudflare Tunnel ─► Pi :8090
-up.t1mo.dev       the Pi ───────┘
-
-up.t1mo.dev/s/<token>            the preview page for one file
+share.t1mo.dev            the upload page
+share.t1mo.dev/api/…      the API behind it        ─► Cloudflare Tunnel ─► Pi :8090
+share.t1mo.dev/s/<token>  the preview page for one file
 ```
 
-Both hostnames serve the same `index.html`. Pages reads `config.json` to find
-the API; served from the Pi the file is absent and the API is simply
-same-origin. So the page keeps working from either address, and the Pi does
-not need Pages to be up.
+One hostname for everything, served by the Pi. Page and API are same-origin,
+so there is no CORS to configure and nothing to look up before the first
+upload can start. GitHub Pages is not involved.
 
 ## No accounts, by choice
 
@@ -23,21 +20,41 @@ can fetch that file until it expires. There is no login, because the point is
 to hand a link to someone who should not have to make an account.
 
 That also means the service is open to whoever finds it, and it will be
-found: `up.t1mo.dev` appears in the public Certificate Transparency logs the
-moment Cloudflare issues its certificate, and those logs get scanned. The
+found: `share.t1mo.dev` appears in the public Certificate Transparency logs
+the moment Cloudflare issues its certificate, and those logs get scanned. The
 limits below are what stands between that and a full disk — they are
 operational ceilings, not access control.
 
 | Guard | Default | Setting |
 | --- | --- | --- |
-| Size per file | 2 GB | `PORTAL_MAX_GB` |
-| Lifetime | 30 days | `PORTAL_DAYS` |
+| Size per file | 5 GB, raisable to 10 | `PORTAL_BASE_GB`, `PORTAL_MAX_GB` |
 | Uploads per address per hour | 30 | `PORTAL_UPLOADS_PER_HOUR` |
-| Disk kept free | 5 GB | `PORTAL_KEEP_FREE_GB` |
+| Disk kept free | 10 GB | `PORTAL_KEEP_FREE_GB` |
 
 An upload is refused with 507 once free space would fall below the floor, so
 a full disk never takes the rest of the Pi down with it. A sweeper runs hourly
 and also removes blobs no index entry claims.
+
+## Bigger files, kept for less time
+
+A file up to 5 GB is kept 30 days. The page offers a slider to raise the
+ceiling a gigabyte at a time, up to 10 GB, and says what each step costs
+before anything is sent:
+
+| Up to | Kept |
+| --- | --- |
+| 5 GB | 30 days |
+| 6 GB | 25 days |
+| 7 GB | 21 days |
+| 8 GB | 19 days |
+| 9 GB | 17 days |
+| 10 GB | 15 days |
+
+Size times days stays roughly constant, so one 10 GB file costs the disk about
+what a 5 GB file kept twice as long costs. The figure follows the file's real
+size rather than the slider, so a small file uploaded with the ceiling raised
+still keeps the full 30 days. The preview page states how much longer the link
+will work, so the person who receives it does not have to guess.
 
 ## What the recipient sees
 
@@ -89,12 +106,12 @@ volumes:
 ```bash
 docker compose up -d --build
 curl -s localhost:8090/healthz                              # {"ok":true}
-docker compose exec upload-portal python test_portal.py     # 31 checks
+docker compose exec upload-portal python test_portal.py     # 41 checks
 ```
 
 The Cloudflare Tunnel is dashboard-managed, so there is no `config.yml` on the
 Pi. Its public hostname lives under Networks → Tunnels → Configure → published
-application routes: `up` · `t1mo.dev` · HTTP · `localhost:8090`.
+application routes: `share` · `t1mo.dev` · HTTP · `localhost:8090`.
 
 Files from the earlier layout under `incoming/` are adopted automatically on
 first start and given the standard lifetime.
@@ -115,7 +132,7 @@ docker compose exec upload-portal python portalctl.py sweep
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/` | the upload page |
-| `GET` | `/api/config` | limits and lifetime, for the page |
+| `GET` | `/api/config` | limits and the size-to-days scale, for the page |
 | `POST` | `/api/upload/init` | reserve a slot, returns `uploadId` |
 | `PUT` | `/api/upload/part?id=&i=` | one chunk, in order |
 | `POST` | `/api/upload/done?id=` | finalise, returns the link |
@@ -133,18 +150,16 @@ than breaking the page.
 
 ## DNS
 
-Both names live in the Cloudflare zone for `t1mo.dev`; the domain stays
-registered at Strato.
+One name, in the Cloudflare zone for `t1mo.dev`; the domain stays registered
+at Strato.
 
 | Name | Record | Proxy |
 | --- | --- | --- |
-| `upload` | CNAME → `timowse.github.io` | DNS only |
-| `up` | created by the tunnel | proxied |
+| `share` | created by the tunnel | proxied |
 
-`upload` stays unproxied so GitHub Pages terminates its own TLS. `.dev` is
-HSTS-preloaded, so both names only work over HTTPS — there is no plain HTTP
-fallback for debugging.
+`.dev` is HSTS-preloaded, so the name only works over HTTPS — there is no
+plain HTTP fallback for debugging.
 
-Note for anyone editing DNS: creating a subdomain through Strato's panel
-points it at Strato's own webspace instead of the target, which is why
-`upload` has to be an explicit CNAME.
+Note for anyone editing DNS here: creating a subdomain through Strato's panel
+points it at Strato's own webspace rather than at the target, so a name that
+has to reach something else needs an explicit record in Cloudflare.

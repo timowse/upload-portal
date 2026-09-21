@@ -54,11 +54,34 @@
   }
   .drop h2{margin:0 0 5px;font-size:1.1rem}
   .drop p{margin:0;color:var(--muted);font-size:.9rem}
-  .facts{
-    display:flex;gap:8px;justify-content:center;flex-wrap:wrap;
-    margin-top:16px;color:var(--muted);font-size:.82rem;
+
+  .limit{
+    background:var(--card);border:1px solid var(--line);border-radius:16px;
+    padding:15px 16px;margin-top:12px;
   }
-  .facts span{background:var(--soft);border:1px solid var(--line);border-radius:999px;padding:5px 11px}
+  .limit-head{display:flex;justify-content:space-between;align-items:baseline;gap:10px}
+  .limit-head span{color:var(--muted);font-size:.86rem}
+  .limit-head strong{font-size:1.02rem;font-variant-numeric:tabular-nums}
+  input[type=range]{
+    -webkit-appearance:none;appearance:none;width:100%;background:none;
+    margin:14px 0 8px;height:26px;
+  }
+  input[type=range]::-webkit-slider-runnable-track{
+    height:6px;border-radius:99px;background:var(--line);
+  }
+  input[type=range]::-moz-range-track{height:6px;border-radius:99px;background:var(--line)}
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;appearance:none;width:26px;height:26px;border-radius:50%;
+    background:var(--accent);border:3px solid var(--card);margin-top:-10px;
+    box-shadow:0 2px 8px rgba(15,23,42,.28);cursor:pointer;
+  }
+  input[type=range]::-moz-range-thumb{
+    width:22px;height:22px;border-radius:50%;background:var(--accent);
+    border:3px solid var(--card);box-shadow:0 2px 8px rgba(15,23,42,.28);cursor:pointer;
+  }
+  .ticks{display:flex;justify-content:space-between;color:var(--muted);font-size:.72rem;margin-top:-2px}
+  .limit-note{margin:9px 0 0;color:var(--muted);font-size:.85rem;line-height:1.45}
+  .limit-note b{color:var(--text);font-weight:650}
 
   .item{
     background:var(--card);border:1px solid var(--line);border-radius:16px;
@@ -115,8 +138,14 @@
     <input type="file" id="pick" multiple />
     <div class="plus">+</div>
     <h2>Datei auswählen</h2>
-    <p>Tippen oder hierher ziehen</p>
-    <div class="facts" id="facts"></div>
+    <p>Tippen oder hierher ziehen · mehrere gleichzeitig möglich</p>
+  </div>
+
+  <div class="limit hidden" id="limitbox">
+    <div class="limit-head"><span>Maximale Dateigröße</span><strong id="limit-val">—</strong></div>
+    <input type="range" id="limit" min="5" max="10" step="1" value="5" />
+    <div class="ticks" id="ticks"></div>
+    <p class="limit-note" id="limit-note"></p>
   </div>
 
   <div id="list"></div>
@@ -126,14 +155,24 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
-let BASE = '';
-let CFG = { chunkSize: 32 * 1024 * 1024, maxBytes: 2 * 1024 ** 3, days: 30, accepting: true };
+const BASE = '';   // same origin
+let CFG = { chunkSize: 32 * 1024 * 1024, baseBytes: 5 * 1024 ** 3,
+            maxBytes: 10 * 1024 ** 3, days: 30, minDays: 7, accepting: true };
+let ceiling = CFG.baseBytes;
 
 const fmt = (n) => {
   const u = ['B','KB','MB','GB','TB']; let v = Number(n)||0, i = 0;
   while (v >= 1024 && i < u.length-1) { v /= 1024; i++; }
   return (i === 0 ? v.toFixed(0) : v.toFixed(1)) + ' ' + u[i];
 };
+
+// Mirrors days_for() on the server, so the page can state the trade before
+// anything is sent. The server still decides; this only has to agree.
+function daysFor(size) {
+  if (!CFG.baseBytes || size <= CFG.baseBytes) return CFG.days;
+  return Math.max(CFG.minDays || 7,
+                  Math.min(CFG.days, Math.round(CFG.baseBytes * CFG.days / size)));
+}
 
 function toast(text) {
   const t = $('toast'); t.textContent = text; t.classList.add('show');
@@ -185,7 +224,8 @@ async function hand(url, title) {
 function card(file) {
   const el = document.createElement('div');
   el.className = 'item';
-  el.innerHTML = `<div class="top"><div class="nm"></div><div class="sz">${fmt(file.size)}</div></div>
+  el.innerHTML = `<div class="top"><div class="nm"></div>
+      <div class="sz">${fmt(file.size)} · ${daysFor(file.size)} Tage</div></div>
     <div class="st">Upload startet…</div>
     <div class="track"><div class="fill"></div></div>`;
   el.querySelector('.nm').textContent = file.name;
@@ -269,10 +309,12 @@ function finish(ui, result) {
 async function run(files) {
   for (const file of Array.from(files)) {
     const ui = card(file);
-    if (file.size > CFG.maxBytes) {
+    if (file.size > ceiling) {
       ui.track.remove();
       ui.st.className = 'st bad';
-      ui.st.textContent = `Zu groß — maximal ${fmt(CFG.maxBytes)} pro Datei.`;
+      ui.st.textContent = file.size <= CFG.maxBytes
+        ? `Zu groß für ${fmt(ceiling)} — zieh den Regler höher.`
+        : `Zu groß — mehr als ${fmt(CFG.maxBytes)} geht nicht.`;
       continue;
     }
     try {
@@ -296,14 +338,7 @@ const drop = $('drop');
 drop.addEventListener('drop', (e) => { if (e.dataTransfer?.files) run(e.dataTransfer.files); });
 
 async function boot() {
-  // On GitHub Pages config.json names the Pi. Served from the Pi itself the
-  // file is absent, and the API is simply same-origin.
-  try {
-    const r = await fetch('config.json?ts=' + Date.now(), { cache: 'no-store' });
-    const cfg = await r.json();
-    if (cfg.backendUrl) BASE = String(cfg.backendUrl).replace(/\/$/, '');
-  } catch (_) { BASE = ''; }
-
+  // Page and API share one hostname, so there is nothing to look up first.
   try {
     CFG = await api('/api/config');
   } catch (_) {
@@ -313,10 +348,32 @@ async function boot() {
     return;
   }
 
-  $('facts').innerHTML =
-    `<span>bis ${fmt(CFG.maxBytes)} pro Datei</span>` +
-    `<span>Link gilt ${CFG.days} Tage</span>` +
-    `<span>mehrere gleichzeitig</span>`;
+  const slider = $('limit');
+  const steps = CFG.scale || [{ bytes: CFG.maxBytes, days: CFG.days }];
+  slider.min = 1;
+  slider.max = steps.length;
+  slider.value = 1;
+  ceiling = steps[0].bytes;
+
+  $('ticks').innerHTML = steps
+    .map((st, i) => (i === 0 || i === steps.length - 1)
+      ? `<span>${Math.round(st.bytes / 1024 ** 3)} GB</span>` : '<span></span>')
+    .join('');
+
+  const apply = () => {
+    const step = steps[Math.min(steps.length - 1, Math.max(0, slider.value - 1))];
+    ceiling = step.bytes;
+    const gb = Math.round(step.bytes / 1024 ** 3);
+    $('limit-val').textContent = gb + ' GB';
+    $('limit-note').innerHTML = steps.length > 1 && slider.value > 1
+      ? `Dateien bis <b>${gb} GB</b> werden <b>${step.days} Tage</b> gespeichert. `
+        + `Je größer die Datei, desto kürzer bleibt sie liegen.`
+      : `Dateien bis <b>${gb} GB</b> werden <b>${step.days} Tage</b> gespeichert. `
+        + `Für größere Dateien den Regler höher ziehen — dafür läuft der Link früher ab.`;
+  };
+  slider.addEventListener('input', apply);
+  apply();
+  $('limitbox').classList.remove('hidden');
 
   if (!CFG.accepting) {
     $('notice').className = 'notice bad';

@@ -189,10 +189,23 @@ const fmtTime = (s) => {
   return (h ? h + ':' + String(m).padStart(2,'0') : String(m)) + ':' + String(sec).padStart(2,'0');
 };
 
+// Whoever opens the link should not have to guess how long it will keep
+// working, so the remaining time sits next to the file's own details.
+function gueltig() {
+  const left = META.expires * 1000 - Date.now();
+  if (left <= 0) return 'abgelaufen';
+  const days = Math.round(left / 86400000);
+  if (days >= 2) return `noch ${days} Tage gültig`;
+  const hours = Math.round(left / 3600000);
+  if (hours >= 2) return `noch ${hours} Stunden gültig`;
+  return 'läuft bald ab';
+}
+
 $('name').textContent = META.name;
 $('sub').textContent = [fmtSize(META.size),
   META.width ? `${META.width}×${META.height}` : null,
-  META.duration ? fmtTime(META.duration) : null].filter(Boolean).join(' · ');
+  META.duration ? fmtTime(META.duration) : null,
+  gueltig()].filter(Boolean).join(' · ');
 $('dl').href = META.base + '/dl';
 
 $('copy').addEventListener('click', async () => {
@@ -388,6 +401,7 @@ function renderCard(glyph, title, copy) {
       <div class="glyph">${glyph}</div>
       <h1>${title}</h1><p>${copy}</p>
       <a class="btn primary" href="${META.base}/dl" download>Herunterladen · ${fmtSize(META.size)}</a>
+      <p style="margin:12px 0 0;font-size:.82rem;color:var(--muted)">${gueltig()}</p>
     </div>`;
 }
 
