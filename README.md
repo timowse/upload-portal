@@ -7,7 +7,7 @@ on. Files delete themselves again.
 share.t1mo.dev            the upload page
 share.t1mo.dev/api/…      the API behind it        ─► Cloudflare Tunnel ─► Pi :8090
 share.t1mo.dev/s/<token>  the preview page for one file
-share.t1mo.dev/c/<token>  the gallery for several
+share.t1mo.dev/c/<token>  the space one upload went into
 ```
 
 One hostname for everything, served by the Pi. Page and API are same-origin,
@@ -29,11 +29,14 @@ operational ceilings, not access control.
 | Guard | Default | Setting |
 | --- | --- | --- |
 | Size per file | 5 GB, raisable to 10 | `PORTAL_BASE_GB`, `PORTAL_MAX_GB` |
-| Uploads per address per hour | 30 | `PORTAL_UPLOADS_PER_HOUR` |
+| Volume per address per hour | 20 GB | `PORTAL_GB_PER_HOUR` |
+| Uploads per address per hour | 500 | `PORTAL_UPLOADS_PER_HOUR` |
 | Disk kept free | 10 GB | `PORTAL_KEEP_FREE_GB` |
 
-An upload is refused with 507 once free space would fall below the floor, so
-a full disk never takes the rest of the Pi down with it. A sweeper runs hourly
+Sixty photos in one go is an ordinary thing to do, so the limit that matters
+is volume rather than file count; the count only stops a request flood. An
+upload is refused with 507 once free space would fall below the floor, so a
+full disk never takes the rest of the Pi down with it. A sweeper runs hourly
 and also removes blobs no index entry claims.
 
 ## Bigger files, kept for less time
@@ -59,16 +62,23 @@ real size rather than the slider, so a small file uploaded with the ceiling
 raised still keeps the full 30 days. The preview page states how much longer the link
 will work, so the person who receives it does not have to guess.
 
-## One link, or one per file
+## An upload is a space, and a space is one link
 
-Every upload gets its own link the moment it lands. Upload more than one file
-and they also get a shared link, a gallery at `/c/<token>` where each tile
-opens that file's own page. Both kinds work at once: hand out the bundle, or
-hand out one file, or both.
+Picking files opens a space and shows its link straight away, before the
+first byte moves. Everything in that batch lands in the same space, including
+files that only succeed on a second try, and the page shows exactly one link
+for all of it.
 
-A bundle holds no bytes of its own. It lives exactly as long as its
-shortest-lived member, loses a file that was deleted or expired, and
-disappears once nothing is left.
+A space holding several files is a gallery at `/c/<token>` where each tile
+opens that file's own page. Holding one, it redirects to that file, because a
+gallery of one is not worth looking at. Each file keeps its own `/s/<token>`
+underneath, so a single picture out of a batch can still be handed over on its
+own.
+
+A space holds no bytes of its own. It lives exactly as long as its
+shortest-lived member and loses a file that was deleted or expired. An empty
+one is not an error: the link gets handed out while the batch is still
+running.
 
 ## What the recipient sees
 
@@ -120,7 +130,7 @@ volumes:
 ```bash
 docker compose up -d --build
 curl -s localhost:8090/healthz                              # {"ok":true}
-docker compose exec upload-portal python test_portal.py     # 54 checks
+docker compose exec upload-portal python test_portal.py     # 57 checks
 ```
 
 The Cloudflare Tunnel is dashboard-managed, so there is no `config.yml` on the
@@ -156,8 +166,8 @@ docker compose exec upload-portal python portalctl.py sweep
 | `GET` | `/s/{token}/preview` | browser-safe rendition of an image |
 | `GET` | `/s/{token}/thumb` | small JPEG for the card and the poster |
 | `GET` | `/s/{token}/dl` | same file as an attachment |
-| `POST` | `/api/bundle` | one link for several, from links already held |
-| `GET` | `/c/{token}` | the gallery for a bundle |
+| `POST` | `/api/space` | open a space for one batch |
+| `GET` | `/c/{token}` | the space: gallery, or a redirect when it holds one |
 | `GET` | `/c/{token}/meta` | its contents, for the page |
 | `GET` | `/healthz` | container health check |
 

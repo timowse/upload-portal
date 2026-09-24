@@ -177,12 +177,8 @@ def delete_file(fid: str) -> bool:
         if not entry:
             return False
         data['shares'].pop(entry.get('share'), None)
-        for tok, bundle_entry in list(data['bundles'].items()):
-            rest = [f for f in bundle_entry['files'] if f != fid]
-            if rest:
-                bundle_entry['files'] = rest
-            else:
-                data['bundles'].pop(tok, None)
+        for bundle_entry in data['bundles'].values():
+            bundle_entry['files'] = [f for f in bundle_entry['files'] if f != fid]
         save(data)
     blob(fid).unlink(missing_ok=True)
     for leftover in THUMB_DIR.glob(f'{fid}*'):
@@ -219,26 +215,46 @@ def count_view(tok: str) -> None:
 
 # -------------------------------------------------------------- bundles
 
-def create_bundle(file_ids: list[str]) -> str | None:
-    """One link for several files, alongside the link each one already has."""
+def create_space() -> str:
+    """An upload goes into a space, and the space is what gets shared.
+
+    It exists before the first byte arrives, so the link can be shown
+    straight away and every file of the batch lands in the same place -
+    including the ones that only succeed on a second try.
+    """
     with locked():
         data = load()
-        live = [f for f in file_ids if f in data['files']]
-        if len(live) < 2:
-            return None
         tok = token(9)
-        data['bundles'][tok] = {'files': live, 'created': int(time.time())}
+        data['bundles'][tok] = {'files': [], 'created': int(time.time())}
         save(data)
         return tok
 
 
+def space_add(tok: str, file_id: str) -> bool:
+    if not SAFE_ID.match(tok or ''):
+        return False
+    with locked():
+        data = load()
+        entry = data['bundles'].get(tok)
+        if entry is None or file_id not in data['files']:
+            return False
+        if file_id not in entry['files']:
+            entry['files'].append(file_id)
+            save(data)
+        return True
+
+
 def bundle(tok: str) -> dict | None:
-    """Resolve a bundle, skipping members that expired or went missing."""
+    """Resolve a space, skipping members that expired or went missing.
+
+    An empty space still resolves: it may simply be waiting for the first
+    upload of a batch that is still running.
+    """
     if not SAFE_ID.match(tok or ''):
         return None
     data = load()
     entry = data['bundles'].get(tok)
-    if not entry:
+    if entry is None:
         return None
     now = time.time()
     items = []
@@ -247,11 +263,10 @@ def bundle(tok: str) -> dict | None:
         if not f or now > f['expires'] or not blob(fid).is_file():
             continue
         items.append({'id': fid, **f})
-    if not items:
-        return None
-    # The bundle is only good while its shortest-lived member is.
-    return {'token': tok, 'files': items,
-            'expires': min(f['expires'] for f in items),
+    # A space is only good while its shortest-lived member is.
+    expires = min((f['expires'] for f in items),
+                  default=int(entry['created'] + DEFAULT_DAYS * 86400))
+    return {'token': tok, 'files': items, 'expires': expires,
             'size': sum(f['size'] for f in items)}
 
 
@@ -272,8 +287,10 @@ def sweep() -> list[str]:
 
     with locked():
         data = load()
+        stale = now - DEFAULT_DAYS * 86400
         empty = [t for t, e in data['bundles'].items()
-                 if not any(f in data['files'] for f in e['files'])]
+                 if not any(f in data['files'] for f in e['files'])
+                 and e.get('created', 0) < stale]
         for t in empty:
             data['bundles'].pop(t, None)
         if empty:
