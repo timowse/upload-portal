@@ -122,8 +122,10 @@ function gueltig() {
   return 'läuft bald ab';
 }
 
-$('title').textContent = `${META.count} Dateien`;
-$('sub').textContent = `${fmt(META.size)} gesamt · ${gueltig()}`;
+$('title').textContent = META.count === 1 ? 'Eine Datei' : `${META.count} Dateien`;
+$('sub').textContent = META.count
+  ? `${fmt(META.size)} gesamt · ${gueltig()}`
+  : 'Hier ist noch nichts angekommen.';
 
 async function hand() {
   if (navigator.share) {
@@ -143,6 +145,13 @@ $('share').addEventListener('click', hand);
 $('copy').addEventListener('click', copy);
 
 const grid = $('grid');
+if (!META.count) {
+  // The link is handed out while the batch is still running, so an empty
+  // space is a normal thing to arrive at, not an error.
+  grid.innerHTML = `<div style="grid-column:1/-1;text-align:center;color:var(--muted);
+    padding:34px 12px;font-size:.92rem">Der Upload läuft vielleicht noch.<br>
+    Lade die Seite gleich neu.</div>`;
+}
 for (const f of META.files) {
   const a = document.createElement('a');
   a.className = 'tile';

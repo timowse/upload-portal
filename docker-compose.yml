@@ -21,9 +21,11 @@ services:
       # Refuse uploads while less than this is free, so a full disk never
       # takes the rest of the Pi down.
       PORTAL_KEEP_FREE_GB: "10"
-      # Nothing authenticates a caller, so cap how fast one address can
-      # start uploads.
-      PORTAL_UPLOADS_PER_HOUR: "30"
+      # Nothing authenticates a caller, so cap how much one address may push
+      # per hour. A photo dump is many small files and perfectly normal, so
+      # the real ceiling is volume; the count only stops a request flood.
+      PORTAL_UPLOADS_PER_HOUR: "500"
+      PORTAL_GB_PER_HOUR: "20"
     volumes:
       # Uploads land on the USB disk, never on the SD card.
       - /home/twiese/work/nextcloud-pi/data/upload-portal:/data

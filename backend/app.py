@@ -22,14 +22,18 @@ from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
+from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse, Response,
+                               StreamingResponse)
 
 import db
 import media
 
 ALLOWED_ORIGIN = os.environ.get('PORTAL_ORIGIN', 'https://share.t1mo.dev')
 PUBLIC_BASE = os.environ.get('PORTAL_PUBLIC_BASE', 'https://share.t1mo.dev').rstrip('/')
-UPLOADS_PER_HOUR = int(os.environ.get('PORTAL_UPLOADS_PER_HOUR', '30'))
+# A photo dump is many small files and is perfectly normal, so the count is
+# generous and the real ceiling is how many bytes one address may push.
+UPLOADS_PER_HOUR = int(os.environ.get('PORTAL_UPLOADS_PER_HOUR', '500'))
+BYTES_PER_HOUR = int(float(os.environ.get('PORTAL_GB_PER_HOUR', '20')) * 1024 ** 3)
 READ_CHUNK = 256 * 1024
 
 HERE = Path(__file__).parent
@@ -64,15 +68,18 @@ def _caller(request: Request) -> str:
             or (request.client.host if request.client else 'unbekannt'))
 
 
-def _rate_limit(request: Request) -> None:
+def _rate_limit(request: Request, size: int) -> None:
     now = time.time()
     seen = _recent[_caller(request)]
-    while seen and now - seen[0] > 3600:
+    while seen and now - seen[0][0] > 3600:
         seen.popleft()
     if len(seen) >= UPLOADS_PER_HOUR:
         raise HTTPException(status_code=429,
                             detail='Zu viele Uploads in kurzer Zeit. Später nochmal.')
-    seen.append(now)
+    if sum(s for _, s in seen) + size > BYTES_PER_HOUR:
+        raise HTTPException(status_code=429,
+                            detail='Zu viel auf einmal. In einer Stunde geht es weiter.')
+    seen.append((now, size))
     if len(_recent) > 5000:                      # keep the bookkeeping bounded
         for key in [k for k, v in _recent.items() if not v][:1000]:
             _recent.pop(key, None)
@@ -137,7 +144,6 @@ def _session_dir(upload_id: str) -> Path:
 
 @app.post('/api/upload/init')
 async def upload_init(request: Request) -> dict:
-    _rate_limit(request)
     try:
         body = await request.json()
     except Exception:
@@ -154,6 +160,7 @@ async def upload_init(request: Request) -> dict:
                             detail=f'Maximal {db.MAX_BYTES // db.GB} GB pro Datei')
     if not db.accepting(size):
         raise HTTPException(status_code=507, detail='Kein Platz mehr frei')
+    _rate_limit(request, size)
 
     upload_id = db.token(12)
     session = _session_dir(upload_id)
@@ -161,6 +168,7 @@ async def upload_init(request: Request) -> dict:
     (session / 'meta.json').write_text(json.dumps({
         'name': db.safe_name(body.get('name')),
         'size': size,
+        'space': str(body.get('space') or '') or None,
         'received': 0,
         'nextIndex': 0,
     }), encoding='utf-8')
@@ -214,6 +222,8 @@ def upload_done(id: str = Query(...)) -> dict:
     os.replace(part, db.blob(entry['id']))
     shutil.rmtree(session, ignore_errors=True)
     media.thumbnail(entry['id'], entry['name'])          # ready for the first visitor
+    if meta.get('space'):
+        db.space_add(meta['space'], entry['id'])
     return {
         'ok': True,
         'name': entry['name'],
@@ -379,39 +389,21 @@ def share_page(token: str) -> HTMLResponse:
 BUNDLE_PAGE = _page('bundle.html')
 
 
-@app.post('/api/bundle')
-async def bundle_create(request: Request) -> dict:
-    """Build a bundle from share links the caller already holds.
+@app.post('/api/space')
+def space_create() -> dict:
+    """Open a space for one upload batch.
 
-    Taking share tokens rather than file ids means this grants nothing new:
-    whoever calls it could already reach every file they are naming.
+    It is created before the first file so the link can be shown right
+    away, and so every file of the batch lands in the same place - the
+    ones that fail and get retried included.
     """
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail='ungültiger Request')
-
-    tokens = body.get('tokens')
-    if not isinstance(tokens, list) or not 2 <= len(tokens) <= 50:
-        raise HTTPException(status_code=400, detail='Zwei bis fünfzig Dateien')
-
-    ids = []
-    for tok in tokens:
-        found = db.share_target(str(tok))
-        if not found:
-            raise HTTPException(status_code=404, detail='Ein Link ist unbekannt oder abgelaufen')
-        if found['id'] not in ids:
-            ids.append(found['id'])
-
-    token = db.create_bundle(ids)
-    if not token:
-        raise HTTPException(status_code=400, detail='Bündel konnte nicht angelegt werden')
-    return {'link': f'{PUBLIC_BASE}/c/{token}', 'count': len(ids)}
+    token = db.create_space()
+    return {'token': token, 'link': f'{PUBLIC_BASE}/c/{token}'}
 
 
 def _bundle_or_404(token: str) -> dict:
     found = db.bundle(token)
-    if not found:
+    if found is None:
         raise HTTPException(status_code=404, detail='Link unbekannt oder abgelaufen')
     return found
 
@@ -443,14 +435,19 @@ def bundle_meta(token: str) -> dict:
     return _bundle_meta(_bundle_or_404(token))
 
 
-@app.get('/c/{token}', response_class=HTMLResponse)
-def bundle_page(token: str) -> HTMLResponse:
+@app.get('/c/{token}')
+def bundle_page(token: str) -> Response:
     found = _bundle_or_404(token)
     info = _bundle_meta(found)
+
+    # A space holding one file should show that file, not a gallery of one.
+    if info['count'] == 1:
+        return RedirectResponse(info['files'][0]['link'], status_code=302)
+
     cover = next((f for f in info['files'] if f['hasThumb']), None)
 
     html = BUNDLE_PAGE.read_text(encoding='utf-8')
-    title = f"{info['count']} Dateien"
+    title = f"{info['count']} Dateien" if info['count'] else 'Noch nichts hochgeladen'
     replacements = {
         '__TITLE__': title,
         '__OG_IMAGE__': cover['thumb'] if cover else '',

@@ -113,6 +113,7 @@
   }
   .btn:active{transform:scale(.98)}
   .btn.primary{background:var(--accent);border-color:transparent;color:var(--ink)}
+  .btn.sm{min-height:38px;padding:9px 14px;font-size:.86rem;flex:0 0 auto;margin-top:10px}
   .notice{
     margin-top:18px;padding:13px 15px;border-radius:14px;background:var(--soft);
     border:1px solid var(--line);color:var(--muted);font-size:.86rem;text-align:center;
@@ -227,18 +228,13 @@ async function hand(url, title) {
 function card(file) {
   const el = document.createElement('div');
   el.className = 'item';
-  el.innerHTML = `<div class="top"><div class="nm"></div>
-      <div class="sz">${fmt(file.size)} · ${daysFor(file.size)} Tage</div></div>
-    <div class="st">Upload startet…</div>
+  el.innerHTML = `<div class="top"><div class="nm"></div><div class="sz">${fmt(file.size)}</div></div>
+    <div class="st">wartet…</div>
     <div class="track"><div class="fill"></div></div>`;
   el.querySelector('.nm').textContent = file.name;
   $('list').appendChild(el);
-  return {
-    el,
-    st: el.querySelector('.st'),
-    fill: el.querySelector('.fill'),
-    track: el.querySelector('.track'),
-  };
+  return { el, st: el.querySelector('.st'), fill: el.querySelector('.fill'),
+           track: el.querySelector('.track') };
 }
 
 function restzeit(seconds, pct) {
@@ -256,8 +252,9 @@ function restzeit(seconds, pct) {
   return `noch etwa ${h} Stunde${h === 1 ? '' : 'n'}` + (rest ? ` ${rest} Min.` : '');
 }
 
-async function uploadOne(file, ui) {
-  const init = await post('/api/upload/init', { name: file.name, size: file.size });
+async function sendFile(file, ui) {
+  const init = await post('/api/upload/init',
+                          { name: file.name, size: file.size, space: space.token });
   const chunks = Math.max(1, Math.ceil(file.size / init.chunkSize));
   const started = Date.now();
   let sent = 0;
@@ -276,7 +273,7 @@ async function uploadOne(file, ui) {
 
   show(0);
   for (let i = 0; i < chunks; i++) {
-    const blob = file.slice(i * init.chunkSize, Math.min((i+1) * init.chunkSize, file.size));
+    const blob = file.slice(i * init.chunkSize, Math.min((i + 1) * init.chunkSize, file.size));
     const base = sent;
     await putChunk(`/api/upload/part?id=${encodeURIComponent(init.uploadId)}&i=${i}`, blob,
       (loaded) => show(base + loaded));
@@ -287,84 +284,87 @@ async function uploadOne(file, ui) {
   return post(`/api/upload/done?id=${encodeURIComponent(init.uploadId)}`);
 }
 
-function finish(ui, result) {
-  ui.el.classList.add('ready');
-  ui.track.remove();
-  ui.st.className = 'st good';
-  ui.st.textContent = `Fertig · Link gilt ${result.days} Tage`;
-  const box = document.createElement('div');
-  box.className = 'linkbox';
-  box.innerHTML = '<code></code>';
-  box.querySelector('code').textContent = result.link;
-  const acts = document.createElement('div');
-  acts.className = 'acts';
-  acts.innerHTML = `<button class="btn primary" data-a="share">Teilen</button>
-                    <button class="btn" data-a="copy">Kopieren</button>
-                    <a class="btn" href="${result.link}" target="_blank" rel="noopener">Ansehen</a>`;
-  acts.querySelector('[data-a=share]').addEventListener('click', () => hand(result.link, result.name));
-  acts.querySelector('[data-a=copy]').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(result.link); toast('Link kopiert'); }
-    catch (_) { prompt('Link', result.link); }
-  });
-  ui.el.append(box, acts);
-}
+// One upload, one space, one link. The space is opened before the first
+// byte moves, so the link is there to copy while the rest is still running.
+const space = { token: null, link: null, done: 0, days: null, el: null };
 
-// Every file keeps its own link. Once there are at least two, they also get
-// one link that holds all of them, rebuilt as more arrive.
-const session = [];
+async function openSpace() {
+  if (space.token) return;
+  const made = await post('/api/space');
+  space.token = made.token;
+  space.link = made.link;
 
-async function addBundle() {
-  if (session.length < 2) return;
-  let result;
-  try {
-    result = await post('/api/bundle', { tokens: session.map((l) => l.split('/').pop()) });
-  } catch (_) {
-    return;
-  }
-  document.getElementById('bundle')?.remove();
   const el = document.createElement('div');
   el.className = 'item ready';
-  el.id = 'bundle';
-  el.innerHTML = `<div class="top"><div class="nm">Alle ${result.count} Dateien zusammen</div></div>
-    <div class="st good">Ein Link für alles</div>
+  el.innerHTML = `<div class="top"><div class="nm" id="space-title">Dein Link</div></div>
+    <div class="st good" id="space-note">Upload läuft…</div>
     <div class="linkbox"><code></code></div>
     <div class="acts">
       <button class="btn primary" data-a="share">Teilen</button>
       <button class="btn" data-a="copy">Kopieren</button>
-      <a class="btn" href="${result.link}" target="_blank" rel="noopener">Ansehen</a>
+      <a class="btn" href="${made.link}" target="_blank" rel="noopener">Ansehen</a>
     </div>`;
-  el.querySelector('code').textContent = result.link;
-  el.querySelector('[data-a=share]').addEventListener('click',
-    () => hand(result.link, `${result.count} Dateien`));
+  el.querySelector('code').textContent = made.link;
+  el.querySelector('[data-a=share]').addEventListener('click', () => hand(made.link, 'Dateien'));
   el.querySelector('[data-a=copy]').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(result.link); toast('Link kopiert'); }
-    catch (_) { prompt('Link', result.link); }
+    try { await navigator.clipboard.writeText(made.link); toast('Link kopiert'); }
+    catch (_) { prompt('Link', made.link); }
   });
+  space.el = el;
   $('list').prepend(el);
 }
 
-async function run(files) {
-  for (const file of Array.from(files)) {
-    const ui = card(file);
-    if (file.size > ceiling) {
-      ui.track.remove();
-      ui.st.className = 'st bad';
-      ui.st.textContent = file.size <= CFG.maxBytes
-        ? `Zu groß für ${fmt(ceiling)} — zieh den Regler höher.`
-        : `Zu groß — mehr als ${fmt(CFG.maxBytes)} geht nicht.`;
-      continue;
-    }
-    try {
-      const result = await uploadOne(file, ui);
-      finish(ui, result);
-      session.push(result.link);
-    } catch (err) {
-      ui.track.remove();
-      ui.st.className = 'st bad';
-      ui.st.textContent = err.message;
-    }
+function refreshSpace() {
+  if (!space.el) return;
+  const n = space.done;
+  $('space-title').textContent = n === 1 ? 'Eine Datei · dein Link'
+                                         : `${n} Dateien · ein Link für alles`;
+  $('space-note').textContent = space.days
+    ? `Gilt ${space.days} Tage` : 'Upload läuft…';
+}
+
+async function uploadFile(file, ui) {
+  ui.el.classList.remove('ready');
+  ui.st.className = 'st';
+  ui.el.querySelector('.retry')?.remove();
+  if (!ui.track.isConnected) ui.el.appendChild(ui.track);
+
+  if (file.size > ceiling) {
+    ui.track.remove();
+    ui.st.className = 'st bad';
+    ui.st.textContent = file.size <= CFG.maxBytes
+      ? `Zu groß für ${fmt(ceiling)} — zieh den Regler höher.`
+      : `Zu groß — mehr als ${fmt(CFG.maxBytes)} geht nicht.`;
+    return;
   }
-  await addBundle();
+  try {
+    const result = await sendFile(file, ui);
+    ui.track.remove();
+    ui.el.classList.add('ready');
+    ui.st.className = 'st good';
+    ui.st.textContent = 'Fertig';
+    space.done += 1;
+    space.days = result.days;
+    refreshSpace();
+  } catch (err) {
+    ui.track.remove();
+    ui.st.className = 'st bad';
+    ui.st.textContent = err.message;
+    const again = document.createElement('button');
+    again.className = 'btn sm retry';
+    again.textContent = 'Nochmal versuchen';
+    again.addEventListener('click', () => { again.remove(); uploadFile(file, ui); });
+    ui.el.appendChild(again);
+  }
+}
+
+async function run(files) {
+  const list = Array.from(files);
+  if (!list.length) return;
+  await openSpace();
+  refreshSpace();
+  const rows = list.map((f) => [f, card(f)]);
+  for (const [file, ui] of rows) await uploadFile(file, ui);
 }
 
 $('pick').addEventListener('change', (e) => { run(e.target.files); e.target.value = ''; });

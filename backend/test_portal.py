@@ -49,8 +49,11 @@ def section(title: str) -> None:
     print(f'\n{title}')
 
 
-def upload(c, name: str, payload: bytes, piece: int = 300_000):
-    init = c.post('/api/upload/init', json={'name': name, 'size': len(payload)})
+def upload(c, name: str, payload: bytes, piece: int = 300_000, space: str | None = None):
+    body = {'name': name, 'size': len(payload)}
+    if space:
+        body['space'] = space
+    init = c.post('/api/upload/init', json=body)
     if init.status_code != 200:
         return init
     uid = init.json()['uploadId']
@@ -134,41 +137,61 @@ with TestClient(appmod.app) as c:
     check('Datei ist von der Platte weg', not db.blob(entry['id']).exists())
     check('Index ist leer', db.stats()['files'] == 0)
 
-    section('Tempodrossel')
+    section('Tempodrossel nach Anzahl')
     appmod.UPLOADS_PER_HOUR = 2
     appmod._recent.clear()
     codes = [c.post('/api/upload/init', json={'name': 'x.bin', 'size': 10}).status_code
              for _ in range(4)]
     check('bremst nach dem Limit', codes[:2] == [200, 200] and codes[-1] == 429, codes)
-
-    section('Sammel-Link')
     appmod.UPLOADS_PER_HOUR = 500
-    appmod._recent.clear()
-    a = upload(c, 'eins.jpg', b'a' * 1000).json()['link'].rsplit('/', 1)[-1]
-    bshare = upload(c, 'zwei.jpg', b'b' * 2000).json()['link'].rsplit('/', 1)[-1]
-    check('eine Datei ergibt kein Buendel',
-          c.post('/api/bundle', json={'tokens': [a]}).status_code == 400)
-    check('unbekannter Link wird abgewiesen',
-          c.post('/api/bundle', json={'tokens': [a, 'gibtsnicht123']}).status_code == 404)
-    made = c.post('/api/bundle', json={'tokens': [a, bshare]})
-    check('Buendel angelegt', made.status_code == 200 and made.json()['count'] == 2, made.text)
-    btok = made.json()['link'].rsplit('/', 1)[-1]
-    bmeta = c.get(f'/c/{btok}/meta').json()
-    check('enthaelt beide Dateien', bmeta['count'] == 2 and bmeta['size'] == 3000, bmeta)
-    check('jede Datei behaelt ihren eigenen Link',
-          all('/s/' in f['link'] for f in bmeta['files']), bmeta['files'])
-    check('Restlaufzeit auch am Buendel', bmeta['daysLeft'] == db.DEFAULT_DAYS)
-    bpage = c.get(f'/c/{btok}')
-    check('Sammel-Seite liefert HTML', bpage.status_code == 200 and '<title>' in bpage.text)
-    check('Open-Graph nennt die Anzahl', 'og:title" content="2 Dateien"' in bpage.text)
-    check('unbekanntes Buendel -> 404', c.get('/c/gibtsnicht123').status_code == 404)
 
-    first = db.share_target(a)['id']
-    db.delete_file(first)
-    rest = c.get(f'/c/{btok}/meta').json()
-    check('geloeschte Datei faellt aus dem Buendel', rest['count'] == 1, rest)
-    db.delete_file(db.share_target(bshare)['id'])
-    check('leeres Buendel -> 404', c.get(f'/c/{btok}').status_code == 404)
+    section('Space: ein Upload, ein Link')
+    appmod.UPLOADS_PER_HOUR = 500
+    appmod.BYTES_PER_HOUR = 10 * db.GB
+    appmod._recent.clear()
+    sp = c.post('/api/space').json()
+    check('Space wird vorab geoeffnet', sp['link'].startswith('https://share.t1mo.dev/c/'), sp)
+    check('leerer Space ist keine Fehlseite', c.get(f"/c/{sp['token']}").status_code == 200)
+    check('leerer Space meldet null Dateien',
+          c.get(f"/c/{sp['token']}/meta").json()['count'] == 0)
+
+    one = upload(c, 'eins.jpg', b'a' * 1000, space=sp['token'])
+    check('Datei landet im Space', c.get(f"/c/{sp['token']}/meta").json()['count'] == 1)
+    single = c.get(f"/c/{sp['token']}", follow_redirects=False)
+    check('Space mit einer Datei zeigt die Datei',
+          single.status_code == 302 and '/s/' in single.headers.get('location', ''),
+          single.status_code)
+
+    upload(c, 'zwei.jpg', b'b' * 2000, space=sp['token'])
+    meta = c.get(f"/c/{sp['token']}/meta").json()
+    check('zweite Datei kommt dazu', meta['count'] == 2 and meta['size'] == 3000, meta)
+    check('ab zwei Dateien die Galerie',
+          c.get(f"/c/{sp['token']}", follow_redirects=False).status_code == 200)
+    check('jede Datei behaelt ihren eigenen Link',
+          all('/s/' in f['link'] for f in meta['files']))
+    check('Open-Graph nennt die Anzahl',
+          'og:title" content="2 Dateien"' in c.get(f"/c/{sp['token']}").text)
+    check('unbekannter Space -> 404', c.get('/c/gibtsnicht123').status_code == 404)
+
+    db.delete_file(db.share_target(one.json()['link'].rsplit('/', 1)[-1])['id'])
+    check('geloeschte Datei faellt aus dem Space',
+          c.get(f"/c/{sp['token']}/meta").json()['count'] == 1)
+
+    section('Tempolimit haelt einen Foto-Schwung aus')
+    appmod._recent.clear()
+    appmod.UPLOADS_PER_HOUR = 500
+    appmod.BYTES_PER_HOUR = 10 * db.GB
+    batch = c.post('/api/space').json()['token']
+    codes = [upload(c, f'foto{i}.jpg', b'x' * 900, space=batch).status_code for i in range(60)]
+    check('60 Fotos am Stueck gehen durch', codes.count(200) == 60, sorted(set(codes)))
+    check('alle sechzig liegen im selben Space',
+          c.get(f'/c/{batch}/meta').json()['count'] == 60)
+
+    appmod._recent.clear()
+    appmod.BYTES_PER_HOUR = 5000
+    check('aber die Datenmenge bremst',
+          c.post('/api/upload/init', json={'name': 'gross.bin', 'size': 6000}).status_code == 429)
+    appmod.BYTES_PER_HOUR = 10 * db.GB
 
     section('Staffel: groesser heisst kuerzer gespeichert')
     saved = (db.BASE_BYTES, db.MAX_BYTES, db.DEFAULT_DAYS, db.MIN_DAYS)
